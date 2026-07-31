@@ -4,7 +4,7 @@
   "description": "",
   "main": "agent.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "tsx --test tests/*.test.ts",
     "start": "tsx cli.ts"
   },
   "keywords": [],
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@google/adk-devtools": "^1.3.0",
-    "tsx": "^4.23.0"
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
   }
 }
