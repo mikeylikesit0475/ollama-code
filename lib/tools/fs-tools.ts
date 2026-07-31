@@ -6,7 +6,7 @@ import fs from "fs";
 import path from "path";
 import { findFuzzyMatch } from "../matchers.ts";
 import { c, confirmAction, printDiff, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
-import { isPathInWorkspace, globFiles, listDirRecursive } from "../workspace.ts";
+import { isPathInWorkspace, globFiles, listDirRecursive, GLOB_MAX_RESULTS } from "../workspace.ts";
 import { loopGuard, MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
 
 // Shared by read_file and read_files: guards against a single tool call
@@ -343,7 +343,12 @@ export const globFilesTool = new FunctionTool({
   execute: async ({ pattern }) => {
     try {
       const files = globFiles(pattern);
-      return { status: "success", files };
+      const result: any = { status: "success", files };
+      if (files.length >= GLOB_MAX_RESULTS) {
+        result.truncated = true;
+        result.message = `Result capped at ${GLOB_MAX_RESULTS} files. Narrow your glob pattern for a complete list.`;
+      }
+      return result;
     } catch (err: any) {
       return { status: "error", message: err.message };
     }

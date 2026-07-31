@@ -103,12 +103,22 @@ export function listDirRecursive(dir: string, baseDir = dir, depth = 0, state = 
   return results;
 }
 
+// Unlike listDirRecursive (depth 5 / 1000 files), this had no caps at all — a
+// broad pattern like "**/*" in a large repo could return an unbounded file
+// list straight into the model's context. Depth is a bit more generous than
+// listDirRecursive's since glob patterns often intentionally target deep
+// paths (e.g. "src/**/*.ts"); the result cap also guards against symlink
+// cycles turning into runaway recursion.
+const GLOB_MAX_DEPTH = 8;
+export const GLOB_MAX_RESULTS = 1000;
+
 // Helper: Custom glob matcher to find matching files without recursive tree bloat
 export function globFiles(pattern: string): string[] {
   const regex = globToRegex(pattern);
 
   const matched: string[] = [];
-  function walk(dir: string) {
+  function walk(dir: string, depth: number) {
+    if (depth > GLOB_MAX_DEPTH || matched.length >= GLOB_MAX_RESULTS) return;
     let files;
     try {
       files = fs.readdirSync(dir);
@@ -116,6 +126,7 @@ export function globFiles(pattern: string): string[] {
       return;
     }
     for (const file of files) {
+      if (matched.length >= GLOB_MAX_RESULTS) return;
       if (
         file === "node_modules" ||
         file === ".git" ||
@@ -136,11 +147,11 @@ export function globFiles(pattern: string): string[] {
         matched.push(relPath);
       }
       if (isDir) {
-        walk(fullPath);
+        walk(fullPath, depth + 1);
       }
     }
   }
-  walk(process.cwd());
+  walk(process.cwd(), 0);
   return matched;
 }
 

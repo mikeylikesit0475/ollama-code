@@ -178,6 +178,8 @@ Tool Semantics & Guidelines:
 2. read_file supports optional 'startLine' and 'endLine' parameters. Prefer reading specific file sections over reading the entire file when the file exceeds 200 lines to save context budget.
 3. edit_file supports an optional 'edits' list array to apply multiple modifications in a single tool call.
 4. grep_search supports regular expressions, pathspec globs, and context lines via parameter arguments.
+5. You may call multiple independent tools in the same turn (e.g. reading several unrelated files, or running several independent searches) — each call is tracked separately, so parallel calls to the SAME tool are safe too. Do not call tools in parallel when a later call needs the result of an earlier one.
+6. Large results (big files, huge glob/grep matches) are automatically truncated to protect your context window. If a result says truncated, narrow your query or line range rather than repeating the same call.
 
 Workflow:
 1. PLAN: Before writing code, think BRIEFLY (a few sentences) about the approach. Do not over-deliberate.
@@ -194,7 +196,7 @@ IMPORTANT: Keep your reasoning short. When you call write_file, always include t
 
 const cloudModelName = "gemini-2.5-flash";
 const cloudPrompts: Record<string, string> = {
-  "gemini-2.5-flash": `You are a senior coding agent with tools: execute_bash, read_file, read_files, write_file, edit_file, list_dir, glob_files, grep_search, git_commit, git_restore, run_background_command, get_background_output, kill_background_job, web_fetch, todo_write. Use tools to plan, write, edit, and verify code. execute_bash doesn't persist cwd (use cwd param). Prefer edit_file for existing files (supports multi-edits and dryRun). Use read_files for multi-read. Prefer read_file line range slices for files > 200 lines. Use glob_files for pattern searches. Be concise. Summarize in plain text when done.`,
+  "gemini-2.5-flash": `You are a senior coding agent with tools: execute_bash, read_file, read_files, write_file, edit_file, list_dir, glob_files, grep_search, git_commit, git_restore, run_background_command, get_background_output, kill_background_job, web_fetch, todo_write. Use tools to plan, write, edit, and verify code. execute_bash doesn't persist cwd (use cwd param). Prefer edit_file for existing files (supports multi-edits and dryRun). Use read_files for multi-read. Prefer read_file line range slices for files > 200 lines. Use glob_files for pattern searches. Independent tool calls (including parallel calls to the same tool) are safe and tracked separately; only sequence calls when one depends on another's result. Large results are truncated to protect context — narrow your query rather than repeating a truncated call. Be concise. Summarize in plain text when done.`,
 };
 const cloudParams: Record<string, { temperature: number; topP: number; topK: number; maxOutputTokens: number }> = {
   "gemini-2.5-flash": { temperature: 0.2, topP: 0.95, topK: 40, maxOutputTokens: 8192 },
