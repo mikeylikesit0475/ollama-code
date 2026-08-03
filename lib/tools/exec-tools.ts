@@ -8,7 +8,7 @@ import fs from "fs";
 import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
-import { MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
+import { loopGuard, MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
 
 const COMMON_CS_NAMESPACES: Record<string, string> = {
   "List": "using System.Collections.Generic;",
@@ -192,6 +192,22 @@ export const executeBash = new FunctionTool({
       printToolResult(c.error(`HARD STOP: Exceeded ${MAX_TOOL_CALLS_PER_TURN} tool calls this turn.`));
       return { status: "error", message: `EXECUTION HALTED: Maximum tool calls exceeded. STOP all tool use immediately.` };
     }
+
+    // Repeat-command guard: a back-to-back identical call (nothing else run
+    // in between) is almost always a stuck model re-verifying output it
+    // already has, not a legitimate re-run — a genuine re-run after a fix
+    // has a write_file/edit_file call in between, which breaks this check.
+    // Recorded before confirmation so a denial-then-immediate-retry also
+    // counts, same rationale as write_file's repeat guard.
+    const recentCall = loopGuard.history[loopGuard.history.length - 1];
+    if (recentCall && recentCall.toolName === "execute_bash" && recentCall.command === command && recentCall.cwd === cwd) {
+      printToolResult(c.error("BLOCKED: identical command repeated."));
+      return {
+        status: "error",
+        message: `BLOCKED: you just ran this exact command ("${command}") and already have its output above — running it again will not produce new information. If it succeeded, move on. If it failed, fix the underlying issue with edit_file first, or try a different diagnostic command instead of repeating this one.`
+      };
+    }
+    loopGuard.history.push({ toolName: "execute_bash", command, cwd });
 
     const execCwd = cwd ? path.resolve(process.cwd(), cwd) : process.cwd();
     if (cwd && !fs.existsSync(execCwd)) {

@@ -8,6 +8,8 @@ export interface ToolCallHistoryEntry {
   toolName: string;
   targetPath?: string;
   oldText?: string;
+  command?: string;
+  cwd?: string;
 }
 
 export const MAX_TOOL_CALLS_PER_TURN = 40;

@@ -10,16 +10,24 @@ import { c } from "./ui.ts";
 // Per-model sampling params for local Ollama models (Ticket 4).
 // Replaces the old hardcoded greedy values (top_k:1, top_p:0.1) that amplified
 // repetition loops in 12B models. Matches the tuned Modelfile client-side too.
-const ollamaModelParams: Record<string, { temperature: number; top_k: number; top_p: number; repeat_penalty: number; repeat_last_n: number; num_predict: number; num_ctx: number }> = {
-  // num_ctx MUST match the model's loaded context_length (16384 per `ollama ps`).
-  // Sending a different value forces Ollama to reload the model weights (~60s hang per request).
+//
+// num_ctx is deliberately optional and only set for the 3 models below, whose
+// loaded context length we've actually verified via `ollama ps` against their
+// Modelfile. Sending a num_ctx that doesn't match what's currently loaded
+// forces Ollama to unload and reload the model (~60s hang per request) — that
+// risk is specific to these locally-tuned models, not something we can safely
+// guess for an arbitrary model name (e.g. Ollama's :cloud-hosted models, which
+// are much larger and almost certainly have a different native context size).
+// Unlisted models fall back to defaultOllamaParams, which omits num_ctx so
+// Ollama just uses whatever's already configured for that model.
+const ollamaModelParams: Record<string, { temperature: number; top_k: number; top_p: number; repeat_penalty: number; repeat_last_n: number; num_predict: number; num_ctx?: number }> = {
   // num_predict is capped at 8192 so the remaining 8k tokens are available for input context
   // (system prompt + user message + reasoning from prior turns).
   "gemma4-coder-tuned:latest": { temperature: 0.2, top_k: 40, top_p: 0.9, repeat_penalty: 1.15, repeat_last_n: 256, num_predict: 8192, num_ctx: 16384 },
   "gemma4:12b-mlx": { temperature: 0.3, top_k: 40, top_p: 0.9, repeat_penalty: 1.2, repeat_last_n: 512, num_predict: 8192, num_ctx: 16384 },
   "gemma4:12b": { temperature: 0.3, top_k: 40, top_p: 0.9, repeat_penalty: 1.2, repeat_last_n: 512, num_predict: 8192, num_ctx: 16384 },
 };
-const defaultOllamaParams = { temperature: 0.2, top_k: 40, top_p: 0.9, repeat_penalty: 1.15, repeat_last_n: 256, num_predict: 8192, num_ctx: 16384 };
+const defaultOllamaParams = { temperature: 0.2, top_k: 40, top_p: 0.9, repeat_penalty: 1.15, repeat_last_n: 256, num_predict: 8192 };
 
 // If no chunk arrives within this window, the stream is assumed stalled
 // (model unloaded, OOM, server hang) and the request is aborted.
@@ -131,6 +139,21 @@ export class OllamaLlm extends BaseLlm {
     const p = ollamaModelParams[this.model] ?? defaultOllamaParams;
     const temp = llmRequest.config?.temperature ?? p.temperature;
 
+    const options: Record<string, any> = {
+      temperature: temp,
+      top_k: p.top_k,
+      top_p: p.top_p,
+      repeat_penalty: p.repeat_penalty,
+      repeat_last_n: p.repeat_last_n,
+      num_predict: p.num_predict,
+    };
+    // Only pin num_ctx for models we've explicitly tuned it for (see
+    // ollamaModelParams comment) — sending a wrong guess for an unlisted
+    // model risks the reload-on-mismatch stall it's meant to avoid.
+    if (p.num_ctx !== undefined) {
+      options.num_ctx = p.num_ctx;
+    }
+
     const requestBody = {
       model: this.model,
       messages,
@@ -138,15 +161,7 @@ export class OllamaLlm extends BaseLlm {
       temperature: temp,
       stream: true,
       stream_options: { include_usage: true },
-      options: {
-        temperature: temp,
-        top_k: p.top_k,
-        top_p: p.top_p,
-        repeat_penalty: p.repeat_penalty,
-        repeat_last_n: p.repeat_last_n,
-        num_predict: p.num_predict,
-        num_ctx: p.num_ctx,
-      }
+      options,
     };
 
     // Combine ADK's abort signal (Ctrl-C / Esc) with our own inactivity
