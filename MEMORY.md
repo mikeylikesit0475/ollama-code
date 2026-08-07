@@ -14,7 +14,8 @@ Gemini/cloud models via `/model <name>` or the `cloud` CLI arg. Entry point: `np
   helpers. No longer holds tool definitions or UI internals directly.
 - `lib/ollama-llm.ts` — the `OllamaLlm` adapter bridging ADK's `BaseLlm` to Ollama's
   `/v1/chat/completions` SSE endpoint. Exposes `lastResponse` per-instance (not a
-  module global) for the token-usage footer.
+  module global) for the token-usage footer, and `getContextWindow()` for the
+  context-% footer.
 - `lib/ui.ts` — color palette, spinner/streaming-output coordination, the readline
   autocomplete prompt, and console printers. Slash-command/model-suggestion data is
   injected once via `configurePromptSuggestions()` rather than imported, so this
@@ -47,10 +48,12 @@ Gemini/cloud models via `/model <name>` or the `cloud` CLI arg. Entry point: `np
 
 TODO.md steps 1-3 are done (command list honesty, path confinement, adapter
 resilience). Step 4's read_file/grep size caps and web_fetch SSRF/HTML
-sanitization are done; "surface stderr on success" for execute_bash is still
-open. Step 5's README is done; elapsed spinner, interrupt hint, context %,
-and persisting `/model` across restarts are still open. `cli.ts` has been
-split into `lib/ollama-llm.ts`, `lib/ui.ts`, `lib/workspace.ts`,
+sanitization are done; "surface stderr on success" for execute_bash is done
+(exec-tools.ts now surfaces stderr even on exit-0 via the spawn-based
+runCommand). Step 5's README is done; elapsed spinner, interrupt hint, and
+persisting `/model` across restarts are still open; the context-% footer is
+done (printTokenUsage renders a fill bar from getContextWindow). `cli.ts` has
+been split into `lib/ollama-llm.ts`, `lib/ui.ts`, `lib/workspace.ts`,
 `lib/loop-guard.ts`, and `lib/tools/` (see Architecture above).
 
 ## Notes for `/dream`

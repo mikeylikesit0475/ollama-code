@@ -3,7 +3,7 @@
 import { FunctionTool } from "@google/adk";
 import { z } from "zod";
 import chalk from "chalk";
-import { execSync } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
@@ -175,6 +175,49 @@ function compressBuildErrors(output: string, command: string): string {
   return output;
 }
 
+// Async command runner using spawn so the process is a real child we can
+// kill on abort (Esc/Ctrl-C). execSync blocks the event loop, which makes a
+// hung command uninterruptible — the exact failure mode that lets a stuck
+// model hammer execute_bash forever. Returns { code, stdout, stderr }.
+function runCommand(
+  command: string,
+  cwd: string,
+  abortSignal?: AbortSignal
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, { cwd, shell: true, encoding: "utf-8" });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      resolve({ code, stdout, stderr });
+    };
+
+    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    child.on("error", (err) => {
+      stderr += (stderr ? "\n" : "") + `[spawn error] ${err.message}`;
+      finish(null);
+    });
+    child.on("close", (code) => finish(code));
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        child.kill("SIGKILL");
+        finish(null);
+      } else {
+        abortSignal.addEventListener("abort", () => {
+          child.kill("SIGKILL");
+          finish(null);
+        }, { once: true });
+      }
+    }
+  });
+}
+
 // Tool 1: execute_bash with inline confirmation
 export const executeBash = new FunctionTool({
   name: "execute_bash",
@@ -183,7 +226,7 @@ export const executeBash = new FunctionTool({
     command: z.string().describe("The exact shell command to run."),
     cwd: z.string().optional().describe("Optional relative path to the directory where the command should execute.")
   }),
-  execute: async ({ command, cwd }) => {
+  execute: async ({ command, cwd }, toolContext) => {
     stopSpinner();
     printToolCall("execute_bash", { command, cwd });
 
@@ -241,33 +284,42 @@ export const executeBash = new FunctionTool({
     let succeeded = false;
 
     while (attempt < maxAttempts) {
-      try {
-        const stdout = execSync(command, { encoding: "utf-8", timeout: 120000, cwd: execCwd });
-        runStdout = stdout;
+      const result = await runCommand(command, execCwd, toolContext?.abortSignal);
+      runStdout = result.stdout;
+      runStderr = result.stderr;
+
+      if (result.code === 0) {
         succeeded = true;
         break;
-      } catch (error: any) {
-        runStdout = error.stdout || "";
-        runStderr = error.stderr || "";
-        const fullOutput = runStdout + "\n" + runStderr + "\n" + (error.message || "");
-
-        // Try local namespace auto-fix pre-pass (costs 0 tokens!) — opt-in via
-        // AUTO_FIX_CS_NAMESPACES=true, since it rewrites files unprompted.
-        const fixed = AUTO_FIX_CS_NAMESPACES && autoFixMissingNamespaces(fullOutput);
-        if (fixed) {
-          console.log(chalk.cyan(`  ⚡ Re-running build command after auto-fix (Attempt ${attempt + 2}/${maxAttempts})...`));
-          attempt++;
-          continue;
-        }
-
-        succeeded = false;
-        break;
       }
+
+      const fullOutput = runStdout + "\n" + runStderr;
+
+      // Try local namespace auto-fix pre-pass (costs 0 tokens!) — opt-in via
+      // AUTO_FIX_CS_NAMESPACES=true, since it rewrites files unprompted.
+      const fixed = AUTO_FIX_CS_NAMESPACES && autoFixMissingNamespaces(fullOutput);
+      if (fixed) {
+        console.log(chalk.cyan(`  ⚡ Re-running build command after auto-fix (Attempt ${attempt + 2}/${maxAttempts})...`));
+        attempt++;
+        continue;
+      }
+
+      succeeded = false;
+      break;
     }
 
     if (succeeded) {
-      printToolResult(runStdout.trim().substring(0, 500) || "(no output)");
-      return { status: "success", stdout: runStdout };
+      // Surface stderr even on exit-0 success: a command can "succeed" while
+      // printing warnings (deprecations, peer-dep notices, tsc diagnostics)
+      // that the model needs to see to understand the real state of the system.
+      // Dropping stderr here is what lets a model re-run the same command
+      // repeatedly, convinced it's fine when it isn't.
+      const stderrTrimmed = runStderr.trim();
+      const combined = stderrTrimmed
+        ? `${runStdout.trim()}\n\n[stderr]\n${stderrTrimmed}`
+        : runStdout.trim();
+      printToolResult(combined.substring(0, 500) || "(no output)");
+      return { status: "success", stdout: combined };
     } else {
       const fullOutput = runStdout + "\n" + runStderr;
       const compressed = compressBuildErrors(fullOutput, command);

@@ -45,6 +45,35 @@ const commands = [
   { cmd: '/quit', desc: 'Exit the runtime' },
 ];
 
+// ─── Clipboard helper (used by /paste) ─────────────────────────────────────
+// Reads clipboard text cross-platform. Returns "" when no clipboard tool is
+// available or the clipboard is empty. Uses execFileSync (no shell) so the
+// clipboard content is never interpreted by a shell, and tries each tool in
+// order so Wayland-first Linux setups fall back to X11 tools cleanly.
+function readClipboard(): string {
+  const attempts: { cmd: string; args: string[] }[] = [];
+  if (process.platform === "darwin") {
+    attempts.push({ cmd: "pbpaste", args: [] });
+  } else if (process.platform === "win32") {
+    attempts.push({ cmd: "powershell", args: ["-NoProfile", "-Command", "Get-Clipboard"] });
+  } else {
+    // Linux: try Wayland first, then X11 tools.
+    attempts.push(
+      { cmd: "wl-paste", args: ["--no-newline"] },
+      { cmd: "xclip", args: ["-selection", "clipboard", "-o"] },
+      { cmd: "xsel", args: ["-b", "-o"] }
+    );
+  }
+  for (const { cmd, args } of attempts) {
+    try {
+      return execFileSync(cmd, args, { encoding: "utf-8" });
+    } catch {
+      // Try the next available clipboard tool.
+    }
+  }
+  return "";
+}
+
 // ─── Streaming + Interrupt State (Ticket 1) ────────────────────────────────
 let activeAbort: AbortController | null = null;
 let isGenerating = false;
@@ -558,30 +587,19 @@ async function main() {
         printHelp();
         continue;
       } else if (command === "/paste") {
-        try {
-          let clipboardText = "";
-          if (process.platform === "darwin") {
-            clipboardText = execSync("pbpaste", { encoding: "utf-8" });
-          } else if (process.platform === "win32") {
-            clipboardText = execSync("powershell -Command Get-Clipboard", { encoding: "utf-8" });
-          } else {
-            clipboardText = execSync("xclip -selection clipboard -o || xsel -b -o", { encoding: "utf-8" });
-          }
+        const clipboardText = readClipboard();
+        const trimmed = clipboardText.trim();
 
-          if (!clipboardText.trim()) {
-            console.log(`\n  ${c.error("Clipboard is empty.")}\n`);
-            continue;
-          }
-
-          console.log(`\n  ${c.success(`✓ Pasted ${clipboardText.split('\n').length} lines from clipboard:`)}`);
-          console.log(c.dim(clipboardText.trim()));
-          console.log();
-
-          userInput = clipboardText;
-        } catch (err: any) {
-          console.log(`\n  ${c.error(`Failed to read clipboard: ${err.message}`)}\n`);
+        if (!trimmed) {
+          console.log(`\n  ${c.error("Clipboard is empty or no clipboard tool is available.")}\n`);
           continue;
         }
+
+        console.log(`\n  ${c.success(`✓ Pasted ${trimmed.split('\n').length} lines from clipboard:`)}`);
+        console.log(c.dim(trimmed));
+        console.log();
+
+        userInput = trimmed;
       } else if (command === "/reset") {
         session = await runner.sessionService.createSession({
           appName: runner.appName,
@@ -754,7 +772,7 @@ async function main() {
       // Print token usage footer
       const modelForUsage = engineerAgent.model;
       if (modelForUsage instanceof OllamaLlm && modelForUsage.lastResponse) {
-        printTokenUsage(modelForUsage.lastResponse, displayModelName);
+        printTokenUsage(modelForUsage.lastResponse, displayModelName, modelForUsage.getContextWindow());
       }
 
       // Execute auto-commit if enabled (and not interrupted or aborted)

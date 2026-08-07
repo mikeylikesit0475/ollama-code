@@ -383,6 +383,13 @@ export class OllamaLlm extends BaseLlm {
     };
   }
 
+  // Context window size for the active model, used to render the context-%
+  // footer. Falls back to a conservative default for models we haven't tuned
+  // (see ollamaModelParams) rather than guessing a num_ctx we haven't verified.
+  getContextWindow(): number {
+    return ollamaModelParams[this.model]?.num_ctx ?? 8192;
+  }
+
   async connect(llmRequest: any): Promise<any> {
     throw new Error("Live connection not supported for Ollama.");
   }

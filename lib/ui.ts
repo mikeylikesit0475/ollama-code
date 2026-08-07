@@ -391,12 +391,28 @@ export function printDiff(oldText: string, newText: string) {
   }
 }
 
-// Print token usage footer
-export function printTokenUsage(data: any, modelName: string) {
+// Print token usage footer. When a context window size is provided, also
+// render how full the context is (prompt tokens as a % of the window) so the
+// user can see when compaction is imminent — a small local model's window
+// fills fast across multi-turn sessions.
+export function printTokenUsage(data: any, modelName: string, contextWindow?: number) {
   if (data?.usage) {
     const { prompt_tokens, completion_tokens, total_tokens } = data.usage;
-    console.log(`\n  ${c.meta(`─ ${total_tokens} tokens (${prompt_tokens} in, ${completion_tokens} out) · ${modelName}`)}`);
+    let ctx = "";
+    if (contextWindow && contextWindow > 0) {
+      const pct = Math.min(100, Math.round((prompt_tokens / contextWindow) * 100));
+      const bar = ctxBar(pct);
+      ctx = ` · ${bar} ${pct}%`;
+    }
+    console.log(`\n  ${c.meta(`─ ${total_tokens} tokens (${prompt_tokens} in, ${completion_tokens} out)${ctx} · ${modelName}`)}`);
   }
+}
+
+// Render a compact 10-cell context-fill bar, e.g. "██████░░░░".
+function ctxBar(pct: number): string {
+  const filled = Math.round((pct / 100) * 10);
+  const color = pct >= 90 ? c.error : pct >= 70 ? c.warn : c.success;
+  return color("█".repeat(filled) + "░".repeat(10 - filled));
 }
 
 // ─── Streaming output coordination ──────────────────────────────────────────
