@@ -142,6 +142,12 @@ export const gitRestore = new FunctionTool({
     stopSpinner();
     printToolCall("git_restore", { path: filePath });
 
+    const fullPath = path.resolve(filePath);
+    if (!isPathInWorkspace(fullPath)) {
+      printToolResult(c.error(`Access Denied: "${filePath}" is outside the workspace.`));
+      return { status: "error", message: "Access Denied: Path is outside workspace." };
+    }
+
     const confirmed = await confirmAction(`Are you sure you want to discard all uncommitted changes in '${filePath}'?`);
     if (!confirmed) {
       printToolResult("Denied by user.");

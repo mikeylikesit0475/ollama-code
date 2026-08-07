@@ -9,6 +9,7 @@ import {
   c, renderMarkdown, promptInput, confirmAction, printToolCall, printTokenUsage,
   startSpinner, stopSpinner, printHelp, printStatus, printWelcomeBanner,
   configurePromptSuggestions, stream, beginStream, endStream, streamToken,
+  printInterruptHint,
 } from "./lib/ui.ts";
 import { getGitContext, ensureGitRepository } from "./lib/workspace.ts";
 import { OllamaLlm } from "./lib/ollama-llm.ts";
@@ -153,6 +154,36 @@ let ollamaModelName = process.env.OLLAMA_MODEL || "gemma4-coder-tuned:latest";
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 let atomicCommits = process.env.GIT_AUTO_COMMIT === "true";
 
+// ─── Persisted model choice (Ticket 5) ─────────────────────────────────────
+// The last model selected via /model (or --model) is written to a small JSON
+// config file so it survives restarts. On boot we read it back and prefer it
+// over the default, so switching models isn't lost every time the CLI exits.
+const configDir = path.join(process.env.HOME || process.cwd(), ".ollama-code");
+const configPath = path.join(configDir, "config.json");
+
+function loadPersistedModel(): { model: string; cloud: boolean } | null {
+  try {
+    if (fs.existsSync(configPath)) {
+      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      if (raw && typeof raw.model === "string" && raw.model) {
+        return { model: raw.model, cloud: !!raw.cloud };
+      }
+    }
+  } catch (e) {
+    // Corrupt/missing config — fall back to defaults.
+  }
+  return null;
+}
+
+function persistModel(model: string, cloud: boolean) {
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify({ model, cloud }, null, 2), "utf-8");
+  } catch (e) {
+    // Non-fatal: persistence is best-effort.
+  }
+}
+
 // Parse command line arguments for custom model flag or cloud execution mode
 const startArgs = process.argv.slice(2);
 
@@ -187,6 +218,18 @@ for (let i = 0; i < startArgs.length; i++) {
     }
   } else if (startArgs[i] === "--atomic-commits") {
     atomicCommits = true;
+  }
+}
+
+// If no explicit model was passed on the command line, restore the last model
+// chosen via /model (or --model) from the previous run so the choice persists
+// across restarts. Explicit CLI args above always win over persisted config.
+const explicitModelArg = startArgs.some((a) => a === "--model" || a === "--cloud" || a === "cloud" || a === "--code" || a === "code" || (!a.startsWith("-") && a !== "code" && a !== "cloud"));
+if (!explicitModelArg) {
+  const persisted = loadPersistedModel();
+  if (persisted) {
+    ollamaModelName = persisted.model;
+    isUsingOllama = !persisted.cloud;
   }
 }
 
@@ -283,7 +326,12 @@ async function queryModelSingle(
 ): Promise<string> {
   const utilityAgent = new LlmAgent({
     name: "utility-agent",
-    model: model,  // use the global model (OllamaLlm or cloud model string)
+    // Use the live agent's model rather than the module-level `model` const,
+    // which is captured at startup and goes stale after a `/model` switch.
+    // engineerAgent.model is mutated in-place by the /model handler, so the
+    // utility agents (auto-commit, adversarial-review, auto-dream) follow the
+    // currently active model instead of the one that was loaded at boot.
+    model: engineerAgent.model,
     instruction: systemPrompt,
     tools: [],
   });
@@ -643,6 +691,7 @@ async function main() {
             // credentials, mirroring the startup-time cloud-mode handling.
             isUsingOllama = false;
             if (process.env.GEMINI_API_KEY === "ollama") delete process.env.GEMINI_API_KEY;
+            persistModel(modelArg, true);
             console.log(`\n  ${c.success(`✓ Switched to cloud model: ${modelArg}`)}\n`);
           } else {
             ollamaModelName = modelArg;
@@ -654,6 +703,7 @@ async function main() {
             // Clear any cloud generateContentConfig so local sampling (per-model
             // params inside OllamaLlm) applies.
             engineerAgent.generateContentConfig = undefined;
+            persistModel(ollamaModelName, false);
             console.log(`\n  ${c.success(`✓ Switched active model to: ${ollamaModelName}`)}\n`);
           }
         }
@@ -691,6 +741,7 @@ async function main() {
     const liveModel = engineerAgent.model;
     if (liveModel instanceof OllamaLlm) liveModel.lastResponse = null;
 
+    printInterruptHint();
     startSpinner("Thinking...");
 
     // Wire an AbortController for this turn so Ctrl-C can interrupt generation

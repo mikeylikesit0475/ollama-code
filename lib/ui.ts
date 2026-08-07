@@ -456,6 +456,7 @@ export function streamToken(delta: string) {
 // ─── Spinner ─────────────────────────────────────────────────────────────────
 let spinnerInterval: any = null;
 let spinnerFrameIdx = 0;
+let spinnerStartTime = 0;
 const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 export function startSpinner(message: string) {
@@ -466,9 +467,15 @@ export function startSpinner(message: string) {
   // tokens get blasted onto the spinning "Thinking..." line and garble it.
   stream.emittedNewline = false;
   spinnerFrameIdx = 0;
+  spinnerStartTime = Date.now();
   spinnerInterval = setInterval(() => {
     const frame = spinnerFrames[spinnerFrameIdx % spinnerFrames.length];
-    process.stdout.write(`\r  ${c.prompt(frame)} ${c.dim(message)}`);
+    // Elapsed-time footer: show whole seconds once the spinner has been running
+    // for a moment, so the user can see a long generation is actually making
+    // progress rather than hung.
+    const elapsed = Math.floor((Date.now() - spinnerStartTime) / 1000);
+    const elapsedStr = elapsed > 0 ? ` ${c.meta(`${elapsed}s`)}` : "";
+    process.stdout.write(`\r  ${c.prompt(frame)} ${c.dim(message)}${elapsedStr}`);
     spinnerFrameIdx++;
   }, 80);
 }
@@ -479,6 +486,13 @@ export function stopSpinner() {
     spinnerInterval = null;
     process.stdout.write('\r' + ' '.repeat(60) + '\r'); // Clear the spinner line
   }
+}
+
+// Print a one-line hint that generation can be interrupted with Esc or Ctrl-C.
+// Shown once at the start of a turn (before the spinner takes over the line) so
+// the user knows the escape hatch exists without cluttering every frame.
+export function printInterruptHint() {
+  console.log(`  ${c.dim('Press Esc or Ctrl-C to interrupt generation')}`);
 }
 
 // ─── Static help / status / banner ──────────────────────────────────────────

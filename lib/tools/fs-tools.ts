@@ -261,18 +261,19 @@ export const editFile = new FunctionTool({
       };
     }
 
-    // Repeat-edit guard (Ticket 3) - only check first edit for simplicity
-    if (editsToApply.length === 1) {
-      const recent = loopGuard.history[loopGuard.history.length - 1];
-      if (recent && recent.toolName === "edit_file" && recent.targetPath === fullPath && recent.oldText === editsToApply[0].oldText) {
-        printToolResult(c.error("BLOCKED: identical edit repeated."));
-        return {
-          status: "error",
-          message: `BLOCKED: you just attempted the exact same edit to "${filePath}" and it failed. Call read_file first.`
-        };
-      }
-      loopGuard.history.push({ toolName: "edit_file", targetPath: fullPath, oldText: editsToApply[0].oldText });
+    // Repeat-edit guard (Ticket 3) - check the first edit whether it came via
+    // the single oldText/newText form or the multi-edit 'edits' array, so a
+    // repeated first edit can't slip through by switching forms.
+    const firstEdit = editsToApply[0];
+    const recent = loopGuard.history[loopGuard.history.length - 1];
+    if (recent && recent.toolName === "edit_file" && recent.targetPath === fullPath && recent.oldText === firstEdit.oldText) {
+      printToolResult(c.error("BLOCKED: identical edit repeated."));
+      return {
+        status: "error",
+        message: `BLOCKED: you just attempted the exact same edit to "${filePath}" and it failed. Call read_file first.`
+      };
     }
+    loopGuard.history.push({ toolName: "edit_file", targetPath: fullPath, oldText: firstEdit.oldText });
 
     // Print all diffs to console
     for (const edit of editsToApply) {

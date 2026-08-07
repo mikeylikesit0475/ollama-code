@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
+import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
 
 export interface BackgroundJob {
   process: any;
@@ -52,6 +53,17 @@ export const runBackgroundCommand = new FunctionTool({
       return { status: "error", message: `The specified directory does not exist: ${cwd}` };
     }
 
+    // Workspace confinement: mirror execute_bash so a background job can't run
+    // with a cwd outside the workspace or reference out-of-workspace paths.
+    if (!isPathInWorkspace(execCwd)) {
+      printToolResult(c.error(`Access Denied: cwd "${cwd}" is outside the workspace.`));
+      return { status: "error", message: `Access Denied: cannot start a background job outside the workspace (cwd: "${cwd}").` };
+    }
+    const escapesWorkspace = commandReferencesOutsideWorkspace(command, execCwd);
+    if (escapesWorkspace) {
+      console.log(`  ${c.warn("⚠️  This command references paths OUTSIDE the workspace.")}`);
+    }
+
     // Kill existing job with same jobId if running
     if (backgroundJobs.has(jobId)) {
       const existing = backgroundJobs.get(jobId)!;
@@ -62,7 +74,9 @@ export const runBackgroundCommand = new FunctionTool({
       }
     }
 
-    const confirmed = await confirmAction(`Allow starting background job '${jobId}'?`);
+    const confirmed = await confirmAction(
+      escapesWorkspace ? `Allow starting OUT-OF-WORKSPACE background job '${jobId}'?` : `Allow starting background job '${jobId}'?`
+    );
     if (!confirmed) {
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted background command execution." };
