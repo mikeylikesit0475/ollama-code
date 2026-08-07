@@ -50,9 +50,10 @@ TODO.md steps 1-3 are done (command list honesty, path confinement, adapter
 resilience). Step 4's read_file/grep size caps and web_fetch SSRF/HTML
 sanitization are done; "surface stderr on success" for execute_bash is done
 (exec-tools.ts now surfaces stderr even on exit-0 via the spawn-based
-runCommand). Step 5's README is done; elapsed spinner, interrupt hint, and
-persisting `/model` across restarts are still open; the context-% footer is
-done (printTokenUsage renders a fill bar from getContextWindow). `cli.ts` has
+runCommand). Step 5 is fully done: README, elapsed spinner, interrupt hint,
+persisting `/model` across restarts (via ~/.ollama-code/config.json), and the
+context-% footer (printTokenUsage renders a fill bar from getContextWindow).
+`cli.ts` has
 been split into `lib/ollama-llm.ts`, `lib/ui.ts`, `lib/workspace.ts`,
 `lib/loop-guard.ts`, and `lib/tools/` (see Architecture above).
 
