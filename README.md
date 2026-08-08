@@ -105,7 +105,6 @@ accumulator (`lib/sse.ts`) and the glob/fuzzy-match helpers (`lib/matchers.ts`).
 
 ```
 cli.ts                     REPL entry point: env/model config, main loop, session handling
-agent.ts                   Minimal standalone ADK agent example (not used by cli.ts)
 lib/ollama-llm.ts          OllamaLlm adapter (ADK BaseLlm -> Ollama's streaming endpoint)
 lib/ui.ts                  Color palette, spinner/streaming state, prompt UI, printers
 lib/workspace.ts           Path confinement, directory/glob walking, git-repo helpers

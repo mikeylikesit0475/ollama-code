@@ -63,7 +63,15 @@ export async function postWriteVerify(filePath: string, workspaceRoot: string): 
   // 4. TypeScript Type Check (if tsconfig.json present)
   if (ext === ".ts" || ext === ".tsx") {
     if (fs.existsSync(path.join(workspaceRoot, "tsconfig.json"))) {
-      const res = await runExec("npx", ["tsc", "--noEmit"], workspaceRoot, VERIFY_TIMEOUT_MS);
+      // Use the project's local tsc binary when available (avoids npx's
+      // network fetch / install prompt), and scope the check to the single
+      // edited file so a full-project typecheck doesn't run on every edit.
+      const localTsc = path.join(workspaceRoot, "node_modules", ".bin", "tsc");
+      const tscBin = fs.existsSync(localTsc) ? localTsc : "npx";
+      const args = fs.existsSync(localTsc)
+        ? ["--noEmit", absolutePath]
+        : ["tsc", "--noEmit", absolutePath];
+      const res = await runExec(tscBin, args, workspaceRoot, VERIFY_TIMEOUT_MS);
       if (res.exitCode !== 0) {
         const errLines = (res.stdout || res.stderr).split("\n").filter(line => line.includes(path.basename(absolutePath))).slice(0, 5).join("\n");
         if (errLines.trim()) {

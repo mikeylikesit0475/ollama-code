@@ -2,7 +2,7 @@
 // Path confinement, directory/glob walking, and git-repo bootstrapping shared
 // across the tool implementations.
 
-import { execSync } from "child_process";
+import { execSync, execFile } from "child_process";
 import fs from "fs";
 import path from "path";
 import { globToRegex } from "./matchers.ts";
@@ -155,20 +155,22 @@ export function globFiles(pattern: string): string[] {
   return matched;
 }
 
-// Helper: Get Git status and diff summary to feed into the model's context window
+// Helper: Get Git status and diff summary to feed into the model's context window.
+// Async (execFile, not execSync) so it never blocks the event loop mid-turn.
 let lastGitStatusRaw = "";
-export function getGitContext(): string {
+function runGit(args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    execFile("git", args, { encoding: "utf-8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }, (err, stdout) => {
+      resolve(err ? "" : stdout);
+    });
+  });
+}
+export async function getGitContext(): Promise<string> {
   try {
-    const status = execSync("git status --porcelain", {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-    const diff = execSync("git diff --stat", {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"]
-    });
+    const [status, diff] = await Promise.all([
+      runGit(["status", "--porcelain"]),
+      runGit(["diff", "--stat"]),
+    ]);
 
     if (!status.trim()) {
       lastGitStatusRaw = "";

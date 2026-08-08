@@ -45,12 +45,11 @@ class VirtualFileSystem:
 
     def touch(self, path):
         parts = path.rstrip('/').split('/')
-        parent_path = "/".join(parts[:-1])
         child_name = parts[-1]
         
-        parent, name = self._get_parent_path(parent_path)
+        parent, name = self._get_parent_path(path)
         if parent is None:
-             raise FileNotFoundError(f"Parent directory {parent_path} does not exist")
+             raise FileNotFoundError(f"Parent directory {path} does not exist")
         
         if name in parent:
              raise FileExistsError(f"File '{path}' already exists")
@@ -63,12 +62,10 @@ class VirtualFileSystem:
         if path == "/":
             current = self.root
         else:
-            parent_path = "/".join(parts[:-1])
-            child_name = parts[-1]
-            parent, name = self._get_parent_path(parent_path)
-            if parent is None or name not in parent:
+            Parent, name = self._get_parent_path(path)
+            if Parent is None or name not in Parent:
                 raise FileNotFoundError(f"Path {path} does not exist")
-            current = parent[name]
+            current = Parent[name]
 
         if current["__type__"] != "dir":
              raise IsADirectoryError(f"'{path}' is a file, not a directory")
@@ -77,10 +74,9 @@ class VirtualFileSystem:
 
     def write(self, path, content):
         parts = path.rstrip('/').split('/')
-        parent_path = "/".join(parts[:-1])
         child_name = parts[-1]
         
-        Parent, name = self._get_parent_path(parent_path)
+        Parent, name = self._get_parent_path(path)
         if Parent is None or name not in Parent:
              raise FileNotFoundError(f"Path {path} does not exist")
         
@@ -95,24 +91,21 @@ class VirtualFileSystem:
         if path == "/":
             current = self.root
         else:
-            parent_path = "/".join(parts[:-1])
-            child_name = parts[-1]
-            Parent, name = self._get_parent_path(parent_path)
+            Parent, name = self._get_parent_path(path)
             if Parent is None or name not in Parent:
                  raise FileNotFoundError(f"Path {path} does not exist")
             current = Parent[name]
 
-        if current["__type__."] != "file":
+        if current["__type__"] != "file":
               raise IsADirectoryError(f"'{path}' is a directory, not a file")
             
         return current["content"]
 
     def rm(self, path):
         parts = path.rstrip('/').split('/')
-        parent_path = "/".join(parts[:-1])
         child_name = parts[-1]
         
-        Parent, name = self._get_parent_path(parent_path)
+        Parent, name = self._get_parent_path(path)
         if Parent is None or name not in Parent:
               raise FileNotFoundError(f"Path {path} does not exist")
             

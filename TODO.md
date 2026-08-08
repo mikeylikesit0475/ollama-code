@@ -2,6 +2,6 @@
 
 - [x] Explore current architecture (cli.ts, tools, compaction)
 - [x] Implement sub-agent delegation tool (already wired)
-- [ ] Solve summarizer deadlock for real context compaction
-- [ ] Wire running-summary compaction into cli.ts
-- [ ] Add tests and verify
+- [x] Solve summarizer deadlock for real context compaction
+- [x] Wire running-summary compaction into cli.ts
+- [x] Add tests and verify

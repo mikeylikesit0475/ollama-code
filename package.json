@@ -1,8 +1,8 @@
 {
-  "name": "my-agent",
+  "name": "ollama-code",
   "version": "1.0.0",
   "description": "",
-  "main": "agent.ts",
+  "main": "cli.ts",
   "scripts": {
     "test": "tsx --test tests/*.test.ts",
     "start": "tsx cli.ts"

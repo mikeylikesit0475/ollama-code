@@ -1,4 +1,4 @@
-import { LlmAgent, Runner, DatabaseSessionService, InMemorySessionService, setLogLevel, LogLevel, TruncatingContextCompactor, stringifyContent } from "@google/adk";
+import { LlmAgent, Runner, DatabaseSessionService, setLogLevel, LogLevel, TruncatingContextCompactor, stringifyContent } from "@google/adk";
 import { execFileSync, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -20,6 +20,7 @@ import { generatePlan, renderPlan } from "./lib/planner.ts";
 import { summarizeHistory } from "./lib/summarizer.ts";
 import { scratchpad } from "./lib/scratchpad.ts";
 import { compaction } from "./lib/compaction.ts";
+import { runUtilityAgent } from "./lib/utility.ts";
 
 // Load environment variables from the .env file next to this script, so config
 // resolves correctly regardless of the machine or the directory it's run from.
@@ -220,11 +221,16 @@ function loadPersistedSandbox(): boolean {
 
 // Parse command line arguments for custom model flag or cloud execution mode
 const startArgs = process.argv.slice(2);
+// True when the user passed any model/mode-related CLI arg, so we don't
+// override it with the persisted model choice below.
+let modelExplicitlySet = false;
 
 if (startArgs[0] === "cloud") {
   isUsingOllama = false;
+  modelExplicitlySet = true;
 } else if (startArgs[0] === "code") {
   isUsingOllama = true;
+  modelExplicitlySet = true;
 } else {
   isUsingOllama = process.env.GEMINI_API_KEY === "ollama";
 }
@@ -238,11 +244,14 @@ for (let i = 0; i < startArgs.length; i++) {
       ollamaModelName = val;
       isUsingOllama = true;
     }
+    modelExplicitlySet = true;
     i++;
   } else if (startArgs[i] === "--cloud" || startArgs[i] === "cloud") {
     isUsingOllama = false;
+    modelExplicitlySet = true;
   } else if (startArgs[i] === "--code" || startArgs[i] === "code") {
     isUsingOllama = true;
+    modelExplicitlySet = true;
   } else if (!startArgs[i].startsWith("-") && startArgs[i] !== "code" && startArgs[i] !== "cloud") {
     ollamaModelName = startArgs[i];
     isUsingOllama = true;
@@ -250,6 +259,7 @@ for (let i = 0; i < startArgs.length; i++) {
     if (isCloudModel) {
       isUsingOllama = false;
     }
+    modelExplicitlySet = true;
   } else if (startArgs[i] === "--atomic-commits") {
     atomicCommits = true;
   }
@@ -258,8 +268,7 @@ for (let i = 0; i < startArgs.length; i++) {
 // If no explicit model was passed on the command line, restore the last model
 // chosen via /model (or --model) from the previous run so the choice persists
 // across restarts. Explicit CLI args above always win over persisted config.
-const explicitModelArg = startArgs.some((a) => a === "--model" || a === "--cloud" || a === "cloud" || a === "--code" || a === "code" || (!a.startsWith("-") && a !== "code" && a !== "cloud"));
-if (!explicitModelArg) {
+if (!modelExplicitlySet) {
   const persisted = loadPersistedModel();
   if (persisted) {
     ollamaModelName = persisted.model;
@@ -362,57 +371,6 @@ engineerAgent.afterToolCallback = () => {
   startSpinner("Thinking...");
 };
 
-async function queryModelSingle(
-  systemPrompt: string,
-  userPrompt: string,
-  onToken: (token: string) => void
-): Promise<string> {
-  const utilityAgent = new LlmAgent({
-    name: "utility-agent",
-    // Use the live agent's model rather than the module-level `model` const,
-    // which is captured at startup and goes stale after a `/model` switch.
-    // engineerAgent.model is mutated in-place by the /model handler, so the
-    // utility agents (auto-commit, adversarial-review, auto-dream) follow the
-    // currently active model instead of the one that was loaded at boot.
-    model: engineerAgent.model,
-    instruction: systemPrompt,
-    tools: [],
-  });
-
-  const sessionService = new InMemorySessionService();
-  const utilityRunner = new Runner({
-    agent: utilityAgent,
-    appName: "utility-agent",
-    sessionService,
-  });
-
-  const tempSessionId = `temp-session-${Math.random().toString(36).substring(2, 9)}`;
-  await sessionService.createSession({
-    appName: "utility-agent",
-    userId: "local-user",
-    sessionId: tempSessionId,
-  });
-  let fullText = "";
-
-  for await (const event of utilityRunner.runAsync({
-    userId: "local-user",
-    sessionId: tempSessionId,
-    newMessage: { role: "user", parts: [{ text: userPrompt }] }
-  })) {
-    if (event.content && event.content.parts) {
-      const text = event.content.parts
-        .filter((part: any) => part.text)
-        .map((part: any) => part.text)
-        .join("");
-      if (text) {
-        fullText += text;
-        onToken(text);
-      }
-    }
-  }
-  return fullText;
-}
-
 async function handleAutoCommit() {
   try {
     const isGit = await ensureGitRepository();
@@ -430,7 +388,7 @@ async function handleAutoCommit() {
     }
     const systemPrompt = "You are a git commit message generator. Generate a concise, 1-line conventional commit message (e.g. 'feat: add folder path parsing') based on the following git diff. Return ONLY the message, no quotes, no markdown, no punctuation at the end, and no extra text.";
 
-    const commitMsg = (await queryModelSingle(systemPrompt, diff || "Minor updates", () => {})).trim();
+    const commitMsg = (await runUtilityAgent(engineerAgent.model, systemPrompt, diff || "Minor updates")).trim();
     stopSpinner();
 
     if (!commitMsg) {
@@ -482,8 +440,10 @@ Use bold highlights and standard markdown. Be extremely direct and critical.`;
     stopSpinner();
     console.log();
     console.log(c.border('─'.repeat(process.stdout.columns || 80)));
-    await queryModelSingle(systemPrompt, diff, (token) => {
-      process.stdout.write(token);
+    await runUtilityAgent(engineerAgent.model, systemPrompt, diff, {
+      onToken: (token) => {
+        process.stdout.write(token);
+      },
     });
     console.log();
     console.log(c.border('─'.repeat(process.stdout.columns || 80)));
@@ -567,7 +527,7 @@ Note: The "Recent History" below may be a compacted running summary rather than 
 
     const userPrompt = `Existing Memory:\n${existingMemory}\n\nRecent History:\n${historyText}`;
 
-    const consolidatedMemory = (await queryModelSingle(systemPrompt, userPrompt, () => {})).trim();
+    const consolidatedMemory = (await runUtilityAgent(engineerAgent.model, systemPrompt, userPrompt)).trim();
 
     if (!isValidMemoryContent(consolidatedMemory)) {
       if (!silent) {
@@ -797,7 +757,7 @@ async function main() {
         console.log(`\n  ${c.success(`✓ Sandboxing ${next ? "ENABLED" : "disabled"}.`)} ${next ? c.dim("execute_bash is now confined to the workspace with network blocked.") : ""}\n`);
         continue;
       } else if (command === "/status") {
-        printStatus({ displayModelName, isUsingOllama, ollamaBaseUrl, gitSummaryLine: getGitContext().split('\n')[0] });
+        printStatus({ displayModelName, isUsingOllama, ollamaBaseUrl, gitSummaryLine: (await getGitContext()).split('\n')[0] });
         continue;
       } else if (command === "/review" || command === "/code-review") {
         await handleAdversarialReview();
@@ -812,7 +772,7 @@ async function main() {
     }
 
     // Auto-prime the agent with Git status context on every turn
-    const gitContext = getGitContext();
+    const gitContext = await getGitContext();
     const memoryContext = getMemoryContext();
 
     // Inject compliance check only when user request implies a deliverable/actionable change (Ticket 3 prompt tuning feedback)

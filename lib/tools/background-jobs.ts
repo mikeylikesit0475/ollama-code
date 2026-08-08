@@ -8,6 +8,7 @@ import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
 import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
+import { isSandboxEnabled, wrapCommand } from "../sandbox.ts";
 
 export interface BackgroundJob {
   process: any;
@@ -82,12 +83,20 @@ export const runBackgroundCommand = new FunctionTool({
       return { status: "denied", message: "User aborted background command execution." };
     }
 
+    if (isSandboxEnabled()) {
+      console.log(`  ${c.dim("🔒 Sandboxed: network blocked, filesystem confined to workspace.")}`);
+    }
+
     try {
-      const child = spawn(command, {
-        shell: true,
-        cwd: execCwd,
-        env: { ...process.env }
-      });
+      // When sandboxing is enabled, wrap the command in bwrap to confine the
+      // filesystem to the workspace and block the network — mirroring
+      // execute_bash so a background job can't reach the network or touch
+      // $HOME even with /sandbox on. Falls back to a plain shell spawn when
+      // bwrap is unavailable.
+      const wrapped = wrapCommand(command, execCwd);
+      const child = wrapped
+        ? spawn(wrapped.file, wrapped.args, { cwd: execCwd, env: { ...process.env } })
+        : spawn(command, { shell: true, cwd: execCwd, env: { ...process.env } });
 
       const job: BackgroundJob = {
         process: child,

@@ -21,8 +21,9 @@ import { c } from "./ui.ts";
 // Unlisted models fall back to defaultOllamaParams, which omits num_ctx so
 // Ollama just uses whatever's already configured for that model.
 const ollamaModelParams: Record<string, { temperature: number; top_k: number; top_p: number; repeat_penalty: number; repeat_last_n: number; num_predict: number; num_ctx?: number }> = {
-  // num_predict is capped at 8192 so the remaining 8k tokens are available for input context
-  // (system prompt + user message + reasoning from prior turns).
+  // num_predict is capped at 8192 so the remaining 8k of the 16k num_ctx window
+  // stays available for input context (system prompt + user message + reasoning
+  // from prior turns). num_ctx pins the loaded window; num_predict caps output.
   "gemma4-coder-tuned:latest": { temperature: 0.2, top_k: 40, top_p: 0.9, repeat_penalty: 1.15, repeat_last_n: 256, num_predict: 8192, num_ctx: 16384 },
   "gemma4:12b-mlx": { temperature: 0.3, top_k: 40, top_p: 0.9, repeat_penalty: 1.2, repeat_last_n: 512, num_predict: 8192, num_ctx: 16384 },
   "gemma4:12b": { temperature: 0.3, top_k: 40, top_p: 0.9, repeat_penalty: 1.2, repeat_last_n: 512, num_predict: 8192, num_ctx: 16384 },
@@ -207,7 +208,6 @@ export class OllamaLlm extends BaseLlm {
     let reasoningText = "";
     const accumulator = new ToolCallAccumulator();
     let usage: any = null;
-    let modelVersion: string | undefined;
     let streamError: string | null = null;
     let timedOut = false;
     const reader = response.body.getReader();
