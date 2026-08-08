@@ -1,9 +1,39 @@
 # Ollama Code
 
-A local, terminal-based coding agent modeled after Claude Code's UX, built on
-[`@google/adk`](https://www.npmjs.com/package/@google/adk). Runs against local
-Ollama models by default, with a switch to Gemini/cloud models when you want more
-horsepower.
+A local-first, terminal-based coding agent — a full-featured harness for building
+autonomous coding agents, built on [`@google/adk`](https://www.npmjs.com/package/@google/adk).
+Runs against local Ollama models by default (fully offline, private), with a
+switch to Gemini/cloud models when you want more horsepower.
+
+> **Bring your own model.** The harness is model-agnostic: point it at a local
+> Ollama model, a Gemini model, or any OpenAI-compatible endpoint. The harness
+> handles the hard parts — tool-calling reliability, context management, memory,
+> permissions, and safety — so the model can focus on the task.
+
+## Why this exists
+
+Coding agents are only as good as the harness around them. This project is a
+from-scratch, production-minded harness that solves the problems that actually
+break agents in the real world: runaway tool loops, stale memory, malformed
+model output, flaky external calls, and confirmation fatigue. It's designed to
+be **extensible** — every major capability is config-driven, so you can adapt
+it without touching the core.
+
+## Highlights
+
+- **Model-agnostic** — local Ollama, Gemini, or any OpenAI-compatible endpoint.
+- **Tool-calling reliability** — SSE parsing with JSON repair for malformed
+  model output, loop guards, and repeat-call detection.
+- **Context management** — running-summary compaction, a persistent scratchpad,
+  and a stale-memory guard so the agent never works from outdated context.
+- **Granular permissions** — allow/deny/ask rules per tool and path, so you can
+  cut confirmation fatigue without losing safety.
+- **Extensible by design** — sub-agents, MCP servers, plugins, custom commands,
+  and LSP integration, all configured via a single `.ollama-code.json`.
+- **Defensive security** — a vulnerability scanner (`/vuln`) that finds issues
+  in your own code and dependencies.
+- **Hardened** — global error boundaries, retry-with-backoff, chaos tests, and
+  cross-platform CI.
 
 ## Setup
 
@@ -213,7 +243,16 @@ npm test
 ```
 
 Runs the `node --test` suite in `tests/`, covering the SSE parser/tool-call
-accumulator (`lib/sse.ts`) and the glob/fuzzy-match helpers (`lib/matchers.ts`).
+accumulator (`lib/sse.ts`), the glob/fuzzy-match helpers (`lib/matchers.ts`),
+permissions, config, and the chaos/failure-injection suite.
+
+## Documentation
+
+- [`docs/engineering.md`](docs/engineering.md) — a deep-dive on the hard problems
+  this harness solves (tool-calling reliability, context management, the Ollama
+  concurrency constraint, extensibility, safety, robustness).
+- [`docs/demo.md`](docs/demo.md) — a step-by-step walkthrough.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute.
 
 ## Robustness
 
