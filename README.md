@@ -226,6 +226,9 @@ accumulator (`lib/sse.ts`) and the glob/fuzzy-match helpers (`lib/matchers.ts`).
   (garbage SSE, pathological JSON, throwing tools) and asserts it recovers.
 - **`--repro` / `/repro`** — captures the exact request/response that caused a bug
   and replays it deterministically for debugging.
+- **Stale-memory guard** — if `MEMORY.md` is older than the last commit (or work
+  happened since it was written), the agent is nudged to run `/dream` so it never
+  works from stale context.
 - **Cross-platform CI** — `.github/workflows/ci.yml` runs the suite on
   Linux/macOS/Windows × Node 20/22.
 

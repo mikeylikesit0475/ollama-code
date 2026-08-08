@@ -636,6 +636,47 @@ function getMemoryContext(): string {
     + (compactionText ? `\n${compactionText}` : "");
 }
 
+// ─── Stale-memory guard ─────────────────────────────────────────────────────
+// Flags when MEMORY.md is out of date relative to recent git activity, so the
+// agent isn't working from stale context. MEMORY.md is considered stale when:
+//   - it doesn't exist, or
+//   - the last commit is newer than the last time MEMORY.md was modified, and
+//     there are uncommitted changes (work happened since the memory was written).
+// Returns a short nudge string (empty when memory is fresh).
+function getStaleMemoryNudge(): string {
+  const memoryFilePath = path.resolve("MEMORY.md");
+  if (!fs.existsSync(memoryFilePath)) {
+    return "\n\nNOTE: No MEMORY.md exists yet. Consider running /init to bootstrap project memory, or /dream after some work.";
+  }
+  try {
+    const memMtime = fs.statSync(memoryFilePath).mtimeMs;
+    // Last commit time (fall back to 0 if not a git repo).
+    let lastCommitMs = 0;
+    try {
+      const { execFileSync } = require("child_process");
+      const out = execFileSync("git", ["log", "-1", "--format=%ct"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      if (out) lastCommitMs = parseInt(out, 10) * 1000;
+    } catch { /* not a git repo */ }
+
+    // Any uncommitted changes?
+    let hasChanges = false;
+    try {
+      const { execFileSync } = require("child_process");
+      const status = execFileSync("git", ["status", "--porcelain"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      hasChanges = status.length > 0;
+    } catch { /* not a git repo */ }
+
+    // Stale if work happened (commit or uncommitted changes) after the last memory write.
+    const workAfterMemory = (lastCommitMs > memMtime) || (hasChanges && lastCommitMs > 0);
+    if (workAfterMemory) {
+      return "\n\nNOTE: MEMORY.md may be stale — there have been commits/changes since it was last updated. Consider running /dream to refresh it before continuing.";
+    }
+  } catch {
+    // ignore stat errors
+  }
+  return "";
+}
+
 // ─── Main Loop ──────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1543,6 +1584,7 @@ setSubAgentModel(engineerAgent.model);
     // Auto-prime the agent with Git status context on every turn
     const gitContext = await getGitContext();
     const memoryContext = getMemoryContext();
+    const staleNudge = getStaleMemoryNudge();
 
     // Inject compliance check only when user request implies a deliverable/actionable change (Ticket 3 prompt tuning feedback)
     let complianceCheck = "";
@@ -1551,7 +1593,7 @@ setSubAgentModel(engineerAgent.model);
     if (deliverableRegex.test(userInput) && !questionRegex.test(userInput)) {
       complianceCheck = `\n\n---\nCRITICAL COMPLIANCE CHECK:\n- Did you implement every requested feature and command?`;
     }
-    const fullPrompt = `${gitContext}${memoryContext}\n\nUser request: ${userInput}${complianceCheck}`;
+    const fullPrompt = `${gitContext}${memoryContext}${staleNudge}\n\nUser request: ${userInput}${complianceCheck}`;
 
     // Multi-file planning (plan-then-execute): before the main agent starts
     // writing code, run a lightweight planner pass that analyzes the request
