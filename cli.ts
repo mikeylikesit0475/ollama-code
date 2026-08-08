@@ -568,6 +568,12 @@ async function main() {
   printWelcomeBanner({ displayModelName, isUsingOllama });
   await cacheLocalModels();
 
+  // Resolve the real context window for the active Ollama model so the
+  // context-% footer reflects what's actually loaded (not a hardcoded guess).
+  if (isUsingOllama && model instanceof OllamaLlm) {
+    await model.refreshContextWindow();
+  }
+
 
   // Persistent session store (Ticket 2): SQLite at ~/.ollama-code/sessions.db.
   // @mikro-orm/sqlite is already installed (transitive of @google/adk), so this
@@ -709,6 +715,8 @@ async function main() {
             const newModel = new OllamaLlm({ model: ollamaModelName, baseUrl: ollamaBaseUrl, onToken: streamToken });
             engineerAgent.model = newModel;
             setDelegateModel(newModel);
+            // Resolve the new model's real context window for the footer.
+            await newModel.refreshContextWindow();
             engineerAgent.instruction = systemPrompts[ollamaModelName] ?? systemPrompts["gemma4-coder-tuned:latest"]!;
             // Clear any cloud generateContentConfig so local sampling (per-model
             // params inside OllamaLlm) applies.

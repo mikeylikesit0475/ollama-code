@@ -383,11 +383,54 @@ export class OllamaLlm extends BaseLlm {
     };
   }
 
+  // Cached effective context window (tokens) for the active model, resolved
+  // from Ollama at runtime rather than guessed. null until refreshContextWindow
+  // has run (or failed) at least once.
+  private contextWindow: number | null = null;
+
+  // The num_ctx we send in the request body for this model (if any). Used to
+  // compute the effective window: Ollama loads min(num_ctx, native context).
+  private get requestedNumCtx(): number | undefined {
+    return ollamaModelParams[this.model]?.num_ctx;
+  }
+
+  // Query Ollama's /api/show for the model's native context length and compute
+  // the EFFECTIVE window actually loaded: min(num_ctx we send, native length).
+  // This is what the context-% footer should measure against — a hardcoded
+  // guess is wrong for any model we haven't tuned (e.g. a 4k or 8k Modelfile
+  // would report 100%+ on an 8192 fallback). Caches the result so the footer
+  // doesn't hit the API every turn. Never throws: on any failure it falls back
+  // to the previous best guess so the footer still renders.
+  async refreshContextWindow(): Promise<number> {
+    try {
+      const res = await fetch(`${this.baseUrl}/api/show`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: this.model }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const info = await res.json();
+      // Ollama exposes the model's native context length under llama.context_length.
+      const native = info?.model_info?.["llama.context_length"];
+      if (typeof native === "number" && native > 0) {
+        const requested = this.requestedNumCtx;
+        // If we pin num_ctx, the loaded window is capped at that; otherwise
+        // Ollama uses the model's native length (or its Modelfile default).
+        this.contextWindow = requested ? Math.min(requested, native) : native;
+      }
+    } catch {
+      // Leave contextWindow as-is (null -> fallback below).
+    }
+    return this.getContextWindow();
+  }
+
   // Context window size for the active model, used to render the context-%
-  // footer. Falls back to a conservative default for models we haven't tuned
-  // (see ollamaModelParams) rather than guessing a num_ctx we haven't verified.
+  // footer. Returns the runtime-resolved effective window when available;
+  // otherwise falls back to the tuned num_ctx or a conservative default rather
+  // than guessing a value we haven't verified.
   getContextWindow(): number {
-    return ollamaModelParams[this.model]?.num_ctx ?? 8192;
+    if (this.contextWindow !== null) return this.contextWindow;
+    return this.requestedNumCtx ?? 8192;
   }
 
   async connect(llmRequest: any): Promise<any> {
