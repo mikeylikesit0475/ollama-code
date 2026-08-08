@@ -9,6 +9,7 @@ import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
 import { loopGuard, MAX_TOOL_CALLS_PER_TURN, MAX_CONSECUTIVE_BASH, exceedsToolCallCap, isBashThrashing } from "../loop-guard.ts";
+import { isSandboxEnabled, wrapCommand } from "../sandbox.ts";
 
 const COMMON_CS_NAMESPACES: Record<string, string> = {
   "List": "using System.Collections.Generic;",
@@ -185,7 +186,13 @@ function runCommand(
   abortSignal?: AbortSignal
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, { cwd, shell: true, encoding: "utf-8" });
+    // When sandboxing is enabled, wrap the command in bwrap to confine the
+    // filesystem to the workspace and block the network. Falls back to a plain
+    // shell spawn when bwrap is unavailable.
+    const wrapped = wrapCommand(command, cwd);
+    const child = wrapped
+      ? spawn(wrapped.file, wrapped.args, { cwd, encoding: "utf-8" })
+      : spawn(command, { cwd, shell: true, encoding: "utf-8" });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -286,6 +293,13 @@ export const executeBash = new FunctionTool({
     if (!confirmed) {
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted command execution." };
+    }
+
+    // Surface the sandbox state so the model knows its filesystem/network
+    // access is confined (and why a command that "should" reach the network
+    // or touch $HOME might fail).
+    if (isSandboxEnabled()) {
+      console.log(`  ${c.dim("🔒 Sandboxed: network blocked, filesystem confined to workspace.")}`);
     }
 
     let attempt = 0;

@@ -15,6 +15,7 @@ import { getGitContext, ensureGitRepository } from "./lib/workspace.ts";
 import { OllamaLlm } from "./lib/ollama-llm.ts";
 import { allTools, killAllBackgroundJobs, setDelegateModel } from "./lib/tools/index.ts";
 import { resetLoopGuard, loopGuard } from "./lib/loop-guard.ts";
+import { isSandboxEnabled, setSandboxEnabled, isBwrapAvailable } from "./lib/sandbox.ts";
 import { generatePlan, renderPlan } from "./lib/planner.ts";
 import { summarizeHistory } from "./lib/summarizer.ts";
 import { scratchpad } from "./lib/scratchpad.ts";
@@ -44,6 +45,7 @@ const commands = [
   { cmd: '/reset', desc: 'Reset conversation history (start fresh)' },
   { cmd: '/status', desc: 'Show current Git status and model status' },
   { cmd: '/model', desc: 'Change active LLM model' },
+  { cmd: '/sandbox', desc: 'Toggle sandboxing of execute_bash (bwrap)' },
   { cmd: '/review', desc: 'Run adversarial code review on active diff' },
   { cmd: '/dream', desc: 'Consolidate session history into MEMORY.md' },
   { cmd: '/exit', desc: 'Exit the runtime' },
@@ -188,6 +190,34 @@ function persistModel(model: string, cloud: boolean) {
   }
 }
 
+// Persist the sandbox toggle alongside the model choice so it survives restarts.
+function persistSandbox(enabled: boolean) {
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    const existing = loadPersistedModel();
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ model: existing?.model ?? null, cloud: existing?.cloud ?? false, sandbox: enabled }, null, 2),
+      "utf-8"
+    );
+  } catch (e) {
+    // Non-fatal: persistence is best-effort.
+  }
+}
+
+// Read the persisted sandbox flag (defaults to OFF) and apply it at boot.
+function loadPersistedSandbox(): boolean {
+  try {
+    if (fs.existsSync(configPath)) {
+      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      if (raw && typeof raw.sandbox === "boolean") return raw.sandbox;
+    }
+  } catch (e) {
+    // Corrupt/missing config — default to OFF.
+  }
+  return false;
+}
+
 // Parse command line arguments for custom model flag or cloud execution mode
 const startArgs = process.argv.slice(2);
 
@@ -235,6 +265,12 @@ if (!explicitModelArg) {
     ollamaModelName = persisted.model;
     isUsingOllama = !persisted.cloud;
   }
+}
+
+// Restore the persisted sandbox toggle (defaults to OFF). If bwrap is missing,
+// silently fall back to disabled rather than breaking the session.
+if (loadPersistedSandbox() && isBwrapAvailable()) {
+  setSandboxEnabled(true);
 }
 
 // If using cloud mode, clear the mock GEMINI_API_KEY so ADK uses real system credentials
@@ -740,6 +776,25 @@ async function main() {
             console.log(`\n  ${c.success(`✓ Switched active model to: ${ollamaModelName}`)}\n`);
           }
         }
+        continue;
+      } else if (command === "/sandbox") {
+        // Toggle sandboxing of execute_bash. When enabled, shell commands run
+        // inside bwrap: network blocked, filesystem confined to the workspace.
+        // The choice is persisted so it survives restarts.
+        const arg = parts[1]?.toLowerCase();
+        let next: boolean;
+        if (arg === "on" || arg === "true" || arg === "1") next = true;
+        else if (arg === "off" || arg === "false" || arg === "0") next = false;
+        else next = !isSandboxEnabled();
+
+        if (next && !isBwrapAvailable()) {
+          console.log(`\n  ${c.error("Sandboxing requires bubblewrap (bwrap), which is not installed on this system.")}\n`);
+          continue;
+        }
+
+        setSandboxEnabled(next);
+        persistSandbox(next);
+        console.log(`\n  ${c.success(`✓ Sandboxing ${next ? "ENABLED" : "disabled"}.`)} ${next ? c.dim("execute_bash is now confined to the workspace with network blocked.") : ""}\n`);
         continue;
       } else if (command === "/status") {
         printStatus({ displayModelName, isUsingOllama, ollamaBaseUrl, gitSummaryLine: getGitContext().split('\n')[0] });

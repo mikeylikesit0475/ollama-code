@@ -40,9 +40,6 @@ Gemini/cloud models via `/model <name>` or the `cloud` CLI arg. Entry point: `np
   `TruncatingContextCompactor` only in local mode — no `LlmSummarizer`.
 - `num_ctx` must match the model's loaded context length or Ollama reloads weights
   (~60s stall per request).
-- Per-model sampling params live in `ollamaModelParams` — greedy decoding (`top_k:1`)
-  previously caused repetition loops in 12B models; current defaults use `top_k:40`,
-  `top_p:0.9`, `repeat_penalty:1.15`.
 
 ## Status
 
@@ -56,6 +53,16 @@ context-% footer (printTokenUsage renders a fill bar from getContextWindow).
 `cli.ts` has
 been split into `lib/ollama-llm.ts`, `lib/ui.ts`, `lib/workspace.ts`,
 `lib/loop-guard.ts`, and `lib/tools/` (see Architecture above).
+
+## Resolved (do not re-raise)
+
+- **"Wrong model file" / excessive execute_bash loop** — RESOLVED. A cloud agent
+  was running with local-Ollama sampling params (`repeat_penalty`, `top_k:40`),
+  causing an infinite `execute_bash` loop. The fix was provider-scoping the
+  sampling params so cloud models never receive Ollama-only fields. This is done;
+  do not revisit. The runtime defenses against runaway loops are
+  `lib/loop-guard.ts` (thrash guard + per-turn cap) and `lib/sandbox.ts` (bwrap
+  confinement, opt-in via `/sandbox`).
 
 ## Notes for `/dream`
 
