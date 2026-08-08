@@ -15,7 +15,7 @@ function withConfig(cfg: any, fn: () => void) {
     fn();
   } finally {
     if (had) fs.writeFileSync(cfgPath, backup!, "utf-8");
-    else if (fs.existsSync(cfgPath)) fs.unlinkSync(cfgPath);
+    else { try { fs.unlinkSync(cfgPath); } catch { /* already gone */ } }
   }
 }
 

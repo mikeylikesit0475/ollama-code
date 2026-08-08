@@ -685,9 +685,10 @@ async function main() {
 
   // --repro <file>: replay a captured request and exit (no REPL).
   if (reproFile) {
+    const reproTarget = reproFile;
     try {
-      console.log(`\n  ${c.meta(`⚡ Replaying captured request from ${reproFile}...`)}`);
-      const result = await replayRepro(reproFile, ollamaBaseUrl);
+      console.log(`\n  ${c.meta(`⚡ Replaying captured request from ${reproTarget}...`)}`);
+      const result = await replayRepro(reproTarget, ollamaBaseUrl);
       console.log();
       process.stdout.write(result);
       console.log();
@@ -1099,7 +1100,7 @@ setSubAgentModel(engineerAgent.model);
       } else if (command === "/explain" || command === "/fix" || command === "/tests") {
         // Intent commands: run a focused utility-agent pass over the target.
         const target = parts.slice(1).join(" ") || ".";
-        const intent = command.slice(1); // explain | fix | tests
+        const intent = command.slice(1) as "explain" | "fix" | "tests";
         const systemPrompt = {
           explain: `You are a code explainer. Given a file path or code section, explain what it does, its key functions, and how it fits together. Be concise and structured.`,
           fix: `You are a debugging agent. Given a bug or error description, investigate the relevant code (use read_file/grep_search), identify the root cause, and apply a minimal fix with edit_file. Verify with execute_bash if possible. Report what you changed.`,
