@@ -4,6 +4,7 @@ export * from "./background-jobs.ts";
 export * from "./web-tools.ts";
 export * from "./search-tools.ts";
 export * from "./git-tools.ts";
+export * from "./delegate-tool.ts";
 
 import { executeBash } from "./exec-tools.ts";
 import { readFile, readFiles, writeFile, editFile, listDir, globFilesTool } from "./fs-tools.ts";
@@ -11,6 +12,22 @@ import { runBackgroundCommand, getBackgroundOutput, killBackgroundJob } from "./
 import { webFetch, todoWrite } from "./web-tools.ts";
 import { grepSearch } from "./search-tools.ts";
 import { gitCommit, gitStatus, gitAdd, gitDiff, gitLog, gitRestore } from "./git-tools.ts";
+import { delegateTask } from "./delegate-tool.ts";
+
+function wrapToolWithMalformedGuard(tool: any) {
+  const originalExecute = tool.execute.bind(tool);
+  tool.execute = async (args: any, context: any) => {
+    if (args && (args.__malformed_arguments || args.error?.includes("malformed"))) {
+      const raw = args.__malformed_arguments || JSON.stringify(args);
+      return {
+        status: "error",
+        message: `INVALID TOOL CALL: Arguments were malformed JSON and could not be parsed. Raw input received: "${raw}". Please reissue this tool call with strict JSON formatting.`
+      };
+    }
+    return originalExecute(args, context);
+  };
+  return tool;
+}
 
 // Same order as the original monolithic tools array in cli.ts.
 export const allTools = [
@@ -33,4 +50,6 @@ export const allTools = [
   killBackgroundJob,
   webFetch,
   todoWrite,
-];
+  delegateTask,
+].map(wrapToolWithMalformedGuard);
+

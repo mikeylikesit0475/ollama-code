@@ -13,8 +13,11 @@ import {
 } from "./lib/ui.ts";
 import { getGitContext, ensureGitRepository } from "./lib/workspace.ts";
 import { OllamaLlm } from "./lib/ollama-llm.ts";
-import { allTools, killAllBackgroundJobs } from "./lib/tools/index.ts";
+import { allTools, killAllBackgroundJobs, setDelegateModel } from "./lib/tools/index.ts";
 import { resetLoopGuard, loopGuard } from "./lib/loop-guard.ts";
+import { generatePlan, renderPlan } from "./lib/planner.ts";
+import { summarizeHistory } from "./lib/summarizer.ts";
+import { scratchpad } from "./lib/scratchpad.ts";
 
 // Load environment variables from the .env file next to this script, so config
 // resolves correctly regardless of the machine or the directory it's run from.
@@ -314,6 +317,9 @@ if (!isUsingOllama && cloudParams[activeModelName]) {
 }
 
 const engineerAgent = new LlmAgent(agentConfig);
+// Keep the delegate_task sub-agent in sync with the live model so it follows
+// /model switches (engineerAgent.model is mutated in-place by the handler).
+setDelegateModel(engineerAgent.model);
 engineerAgent.afterToolCallback = () => {
   // Restart spinner after tool completes (will be cleared when text arrives)
   startSpinner("Thinking...");
@@ -540,18 +546,20 @@ Guidelines:
 }
 
 function getMemoryContext(): string {
+  let memoryText = "";
   const memoryFilePath = path.resolve("MEMORY.md");
   if (fs.existsSync(memoryFilePath)) {
     try {
       const content = fs.readFileSync(memoryFilePath, "utf-8").trim();
       if (content) {
-        return `\n\n---\nPROJECT MEMORY (MEMORY.md):\n${content}\n---`;
+        memoryText = `\n\n---\nPROJECT MEMORY (MEMORY.md):\n${content}\n---`;
       }
     } catch (err) {
       // Ignore
     }
   }
-  return "";
+  const scratchpadText = scratchpad.getContextPrompt();
+  return memoryText + (scratchpadText ? `\n${scratchpadText}` : "");
 }
 
 // ─── Main Loop ──────────────────────────────────────────────────────────────
@@ -685,6 +693,7 @@ async function main() {
             engineerAgent.model = modelArg; // ADK default connector for the bare string
             engineerAgent.instruction = cloudPrompts[modelArg] ?? cloudPrompts[cloudModelName]!;
             engineerAgent.generateContentConfig = cloudParams[modelArg] ?? cloudParams[cloudModelName];
+            setDelegateModel(engineerAgent.model);
             ollamaModelName = modelArg;
             displayModelName = modelArg;
             // Flip to cloud mode at runtime: clear the mock key so ADK uses real
@@ -699,6 +708,7 @@ async function main() {
             isUsingOllama = true;
             const newModel = new OllamaLlm({ model: ollamaModelName, baseUrl: ollamaBaseUrl, onToken: streamToken });
             engineerAgent.model = newModel;
+            setDelegateModel(newModel);
             engineerAgent.instruction = systemPrompts[ollamaModelName] ?? systemPrompts["gemma4-coder-tuned:latest"]!;
             // Clear any cloud generateContentConfig so local sampling (per-model
             // params inside OllamaLlm) applies.
@@ -736,6 +746,31 @@ async function main() {
     }
     const fullPrompt = `${gitContext}${memoryContext}\n\nUser request: ${userInput}${complianceCheck}`;
 
+    // Multi-file planning (plan-then-execute): before the main agent starts
+    // writing code, run a lightweight planner pass that analyzes the request
+    // and repo state, then inject the resulting plan into the main agent's
+    // context so it executes deliberately instead of thrashing on big tasks.
+    // Runs BEFORE the main LLM call, so it does not collide with the
+    // OLLAMA_NUM_PARALLEL=1 constraint. Only invoked for actionable requests.
+    let planBlock = "";
+    if (deliverableRegex.test(userInput) && !questionRegex.test(userInput)) {
+      try {
+        startSpinner("Planning...");
+        const plan = await generatePlan(engineerAgent.model, userInput, gitContext, memoryContext);
+        stopSpinner();
+        planBlock = renderPlan(plan);
+        if (planBlock) {
+          console.log(`  ${c.meta("📋 Plan generated — injecting into agent context")}`);
+        }
+      } catch (err: any) {
+        stopSpinner();
+        console.log(`  ${c.dim(`(planning skipped: ${err.message})`)}`);
+      }
+    }
+    const fullPromptWithPlan = planBlock
+      ? `${gitContext}${memoryContext}\n\n${planBlock}\n\nUser request: ${userInput}${complianceCheck}`
+      : fullPrompt;
+
     // Reset token tracking for whichever OllamaLlm instance is currently live
     // (the /model command can swap engineerAgent.model to a fresh instance).
     const liveModel = engineerAgent.model;
@@ -759,7 +794,7 @@ async function main() {
       for await (const event of runner.runAsync({
         userId: session.userId,
         sessionId: session.id,
-        newMessage: { role: "user", parts: [{ text: fullPrompt }] },
+        newMessage: { role: "user", parts: [{ text: fullPromptWithPlan }] },
         abortSignal: activeAbort.signal,
         runConfig: { maxLlmCalls: 60 },
       })) {

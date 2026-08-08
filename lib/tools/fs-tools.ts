@@ -8,6 +8,8 @@ import { findFuzzyMatch } from "../matchers.ts";
 import { c, confirmAction, printDiff, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { isPathInWorkspace, globFiles, listDirRecursive, GLOB_MAX_RESULTS } from "../workspace.ts";
 import { loopGuard, MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
+import { postWriteVerify } from "../verify.ts";
+import { scratchpad } from "../scratchpad.ts";
 
 // Shared by read_file and read_files: guards against a single tool call
 // reading a huge file (e.g. 50MB) entirely into memory, and against returning
@@ -93,8 +95,8 @@ export const writeFile = new FunctionTool({
   name: "write_file",
   description: "Create a new file or completely overwrite an existing file at a specified path. WARNING: Avoid using write_file to edit existing files or correct syntax errors as it often introduces new typos; instead, use edit_file to make targeted edits.",
   parameters: z.object({
-    path: z.string().describe("Relative path to the target file."),
-    content: z.string().describe("The exact text content to write to the file.")
+    path: z.string().describe("Relative path to the target file (e.g. 'src/App.tsx')."),
+    content: z.string().describe("The exact, complete text content to write to the file.")
   }),
   execute: async ({ path: filePath, content }) => {
     stopSpinner();
@@ -151,7 +153,19 @@ export const writeFile = new FunctionTool({
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, content, "utf-8");
       printToolResult(c.success(`✓ Wrote ${relativeDisplayPath}`));
-      return { status: "success", message: `Successfully wrote file to ${filePath}` };
+      scratchpad.recordFileChange(relativeDisplayPath);
+
+      let message = `Successfully wrote file to ${filePath}`;
+      const verifyMsg = await postWriteVerify(fullPath, process.cwd());
+      if (verifyMsg) {
+        message += `\n\n${verifyMsg}`;
+        printToolResult(c.warn(verifyMsg));
+        scratchpad.recordError(relativeDisplayPath, verifyMsg);
+      } else {
+        scratchpad.clearError(relativeDisplayPath);
+      }
+
+      return { status: "success", message };
     } catch (error: any) {
       printToolResult(c.error(`Error writing ${relativeDisplayPath}: ${error.message}`));
       return { status: "error", message: error.message };
@@ -164,14 +178,14 @@ export const editFile = new FunctionTool({
   name: "edit_file",
   description: "Make one or more precise modifications to an existing file by replacing unique blocks of text (oldText) with new blocks of text (newText). Prefer this tool over write_file when modifying existing files.",
   parameters: z.object({
-    path: z.string().describe("Relative path to the file to modify."),
-    oldText: z.string().optional().describe("The exact, unique block of text to be replaced (omit if using 'edits')."),
-    newText: z.string().optional().describe("The new block of text to replace it with (omit if using 'edits')."),
+    path: z.string().describe("Relative path to the file to modify (e.g. 'src/utils.ts')."),
+    oldText: z.string().optional().describe("The exact, unique block of text to be replaced."),
+    newText: z.string().optional().describe("The new block of text to replace it with."),
     edits: z.array(z.object({
       oldText: z.string().describe("The exact, unique block of text to be replaced."),
       newText: z.string().describe("The new block of text to replace it with.")
-    })).optional().describe("An optional list of multiple non-overlapping modifications to apply at once."),
-    dryRun: z.boolean().optional().describe("If true, only checks if the targets exist uniquely and returns diff previews without writing to disk or prompting for confirmation.")
+    })).optional().describe("An optional list of multiple modifications to apply at once (e.g. [{\"oldText\": \"a\", \"newText\": \"b\"}])."),
+    dryRun: z.boolean().optional().describe("If true, only checks if the targets exist uniquely and returns diff previews.")
   }),
   execute: async ({ path: filePath, oldText, newText, edits, dryRun }) => {
     stopSpinner();
@@ -302,7 +316,19 @@ export const editFile = new FunctionTool({
 
       fs.writeFileSync(fullPath, updatedContent, "utf-8");
       printToolResult(c.success(`✓ Modified ${relativeDisplayPath} (${editsToApply.length} edits)`));
-      return { status: "success", message: `Successfully modified ${filePath} with ${editsToApply.length} edits.` };
+      scratchpad.recordFileChange(relativeDisplayPath);
+
+      let message = `Successfully modified ${filePath} with ${editsToApply.length} edits.`;
+      const verifyMsg = await postWriteVerify(fullPath, process.cwd());
+      if (verifyMsg) {
+        message += `\n\n${verifyMsg}`;
+        printToolResult(c.warn(verifyMsg));
+        scratchpad.recordError(relativeDisplayPath, verifyMsg);
+      } else {
+        scratchpad.clearError(relativeDisplayPath);
+      }
+
+      return { status: "success", message };
     } catch (error: any) {
       printToolResult(c.error(`Error editing ${relativeDisplayPath}: ${error.message}`));
       return { status: "error", message: error.message };

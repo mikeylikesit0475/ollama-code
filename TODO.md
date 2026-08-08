@@ -1,16 +1,12 @@
 # Task Checklist
 
-- [x] Step 1: Code honesty — trim commands list to real commands, remove forwarding fallback
-- [x] Step 2: Security — fix isPathInWorkspace prefix bug, add execute_bash workspace confinement
-- [x] Step 3: Adapter resilience — extract SSE parser to lib/sse.ts, JSON repair, in-stream errors, inactivity timeout, clean abort, tool-ID queues, kill lastApiResponse global, tighten dedup
-- [ ] Step 4: Tool hardening
-  - [x] grep binary crash
-  - [x] read_file size cap
-  - [x] web_fetch sanitization
-  - [ ] surface stderr on success
-- [ ] Step 5: UX + README
-  - [ ] elapsed spinner
-  - [ ] interrupt hint
-  - [ ] context %
-  - [ ] persist /model
-  - [x] write README.md
+- [ ] Sprint 6: Verify Dev Server launches
+- [ ] Sprint 6: Test git scraping tools directly (real repo + invalid path error case)
+- [ ] Sprint 6: Verify tool call sequence / report generation
+- [ ] Sprint 7: Multi-repo scanning (auto-discover .git repos)
+- [ ] Sprint 7: Configurable time range (last N days)
+- [ ] Sprint 7: Branch staleness detection (behind main)
+- [ ] Sprint 7: Commit categorization (feature/bugfix/refactor/docs)
+- [ ] Sprint 7: Report history (~/.standup-agent/reports/)
+- [ ] Sprint 7: Team mode (per-author sections)
+- [ ] Update SPRINT.md / TODO.md status

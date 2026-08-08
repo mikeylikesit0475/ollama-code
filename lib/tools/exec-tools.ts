@@ -8,7 +8,7 @@ import fs from "fs";
 import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
-import { loopGuard, MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
+import { loopGuard, MAX_TOOL_CALLS_PER_TURN, MAX_CONSECUTIVE_BASH, exceedsToolCallCap, isBashThrashing } from "../loop-guard.ts";
 
 const COMMON_CS_NAMESPACES: Record<string, string> = {
   "List": "using System.Collections.Generic;",
@@ -251,6 +251,17 @@ export const executeBash = new FunctionTool({
       };
     }
     loopGuard.history.push({ toolName: "execute_bash", command, cwd });
+
+    // Thrash guard: N consecutive execute_bash calls with no intervening
+    // write/edit means the model is probing instead of acting. Stop it before
+    // it burns the whole turn on diagnostics it isn't learning from.
+    if (isBashThrashing()) {
+      printToolResult(c.error(`BLOCKED: ${MAX_CONSECUTIVE_BASH} consecutive execute_bash calls with no file change.`));
+      return {
+        status: "error",
+        message: `BLOCKED: you have run ${MAX_CONSECUTIVE_BASH} shell commands in a row without writing or editing any file. You are probing the system instead of acting on it. Stop running diagnostics. Use the output you already have to make a concrete change with write_file or edit_file, or ask the user for clarification.`
+      };
+    }
 
     const execCwd = cwd ? path.resolve(process.cwd(), cwd) : process.cwd();
     if (cwd && !fs.existsSync(execCwd)) {
