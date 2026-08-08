@@ -4,7 +4,7 @@
   "description": "",
   "main": "cli.ts",
   "scripts": {
-    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 tests/chaos.test.ts tests/config.test.ts tests/permissions.test.ts tests/ollama-llm.test.ts tests/verify.test.ts tests/sse.test.ts tests/matchers.test.ts",
     "start": "tsx cli.ts"
   },
   "keywords": [],
