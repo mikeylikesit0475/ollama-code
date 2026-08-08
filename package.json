@@ -4,7 +4,7 @@
   "description": "",
   "main": "cli.ts",
   "scripts": {
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "start": "tsx cli.ts"
   },
   "keywords": [],
