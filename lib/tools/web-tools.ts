@@ -6,6 +6,7 @@ import fs from "fs";
 import net from "net";
 import path from "path";
 import { lookup as dnsLookup } from "dns/promises";
+import { withRetry } from "../retry.ts";
 
 // ─── web_fetch SSRF guards ───────────────────────────────────────────────────
 // web_fetch's URL is model-controlled. Without checks a small local model can
@@ -88,7 +89,14 @@ async function safeFetch(urlStr: string, maxRedirects = 5): Promise<Response> {
   let currentUrl = urlStr;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const validated = await assertSafeFetchTarget(currentUrl);
-    const res = await fetch(validated.toString(), { redirect: "manual" });
+    const res = await withRetry(() => fetch(validated.toString(), { redirect: "manual" }), {
+      maxRetries: 2,
+      shouldRetry: (err: any) => {
+        const status = err?.status ?? err?.code;
+        if (typeof status === "number") return status >= 500;
+        return err?.name === "AbortError" || err?.code === "ETIMEDOUT" || err?.code === "ECONNRESET";
+      },
+    });
     const location = res.headers.get("location");
     if (res.status >= 300 && res.status < 400 && location) {
       currentUrl = new URL(location, validated).toString();

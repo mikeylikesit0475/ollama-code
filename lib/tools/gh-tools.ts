@@ -7,6 +7,7 @@
 import { FunctionTool } from "@google/adk";
 import { z } from "zod";
 import { execFile } from "child_process";
+import { withRetry } from "../retry.ts";
 
 function runGh(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
   return new Promise((resolve) => {
@@ -17,6 +18,17 @@ function runGh(args: string[]): Promise<{ ok: boolean; out: string; err: string 
         resolve({ ok: true, out: stdout, err: "" });
       }
     });
+  });
+}
+
+// Retry transient gh failures (network, rate-limit 5xx) with backoff.
+async function runGhRetry(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
+  return withRetry(() => runGh(args), {
+    maxRetries: 2,
+    shouldRetry: (err: any) => {
+      const msg = String(err?.message || err || "");
+      return /network|timeout|rate limit|5\d\d/i.test(msg);
+    },
   });
 }
 
@@ -35,19 +47,19 @@ export const ghPr = new FunctionTool({
       if (!title) return { status: "error", message: "A title is required to create a PR." };
       const args = ["pr", "create", "--title", title];
       if (body) args.push("--body", body);
-      const r = await runGh(args);
+      const r = await runGhRetry(args);
       return r.ok
         ? { status: "success", message: r.out.trim() }
         : { status: "error", message: r.err };
     }
     if (action === "list") {
-      const r = await runGh(["pr", "list"]);
+      const r = await runGhRetry(["pr", "list"]);
       return r.ok
         ? { status: "success", message: r.out.trim() || "No open PRs." }
         : { status: "error", message: r.err };
     }
     // view
-    const r = await runGh(["pr", "view", number || ""]);
+    const r = await runGhRetry(["pr", "view", number || ""]);
     return r.ok
       ? { status: "success", message: r.out.trim() }
       : { status: "error", message: r.err };
@@ -68,12 +80,12 @@ export const ghIssue = new FunctionTool({
       if (!title) return { status: "error", message: "A title is required to create an issue." };
       const args = ["issue", "create", "--title", title];
       if (body) args.push("--body", body);
-      const r = await runGh(args);
+      const r = await runGhRetry(args);
       return r.ok
         ? { status: "success", message: r.out.trim() }
         : { status: "error", message: r.err };
     }
-    const r = await runGh(["issue", "list"]);
+    const r = await runGhRetry(["issue", "list"]);
     return r.ok
       ? { status: "success", message: r.out.trim() || "No open issues." }
       : { status: "error", message: r.err };
@@ -89,7 +101,7 @@ export const ghComment = new FunctionTool({
     body: z.string().describe("The comment text."),
   }),
   execute: async ({ number, body }) => {
-    const r = await runGh(["issue", "comment", number, "--body", body]);
+    const r = await runGhRetry(["issue", "comment", number, "--body", body]);
     return r.ok
       ? { status: "success", message: r.out.trim() || "Comment added." }
       : { status: "error", message: r.err };

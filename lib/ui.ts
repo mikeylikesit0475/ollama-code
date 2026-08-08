@@ -358,7 +358,15 @@ export function promptInput(promptStr: string): Promise<string> {
 }
 
 // Compact inline [y/N] confirmation
+let autoApprove = false;
+export function setAutoApprove(enabled: boolean) {
+  autoApprove = enabled;
+}
+export function isAutoApprove(): boolean {
+  return autoApprove;
+}
 export async function confirmAction(message: string): Promise<boolean> {
+  if (autoApprove) return true;
   const answer = await promptInput(`  ${c.warn(message)} ${c.dim('[y/N]')} `);
   return answer.trim().toLowerCase() === 'y';
 }
@@ -519,6 +527,24 @@ export function printHelp() {
   console.log(`  ${c.prompt('/share')}   ${c.dim('Export the current session to a file or gist')}`);
   console.log(`  ${c.prompt('/lsp')}     ${c.dim('Run LSP diagnostics on a file')}`);
   console.log(`  ${c.prompt('/plugins')} ${c.dim('List loaded plugins')}`);
+  console.log(`  ${c.prompt('/compact')} ${c.dim('Manually compact the conversation context')}`);
+  console.log(`  ${c.prompt('/init')}    ${c.dim('Bootstrap MEMORY.md from the repo structure')}`);
+  console.log(`  ${c.prompt('/memory')}  ${c.dim('View or edit MEMORY.md')}`);
+  console.log(`  ${c.prompt('/context')} ${c.dim('Show a detailed context-window breakdown')}`);
+  console.log(`  ${c.prompt('/rewind')}  ${c.dim('Undo the conversation to an earlier point')}`);
+  console.log(`  ${c.prompt('/add-dir')} ${c.dim('Add a directory to the allowed workspace paths')}`);
+  console.log(`  ${c.prompt('/doctor')}  ${c.dim('Run an environment health check')}`);
+  console.log(`  ${c.prompt('/config')}  ${c.dim('View or edit the config file')}`);
+  console.log(`  ${c.prompt('/version')} ${c.dim('Show the version')}`);
+  console.log(`  ${c.prompt('/update')}  ${c.dim('Self-update')}`);
+  console.log(`  ${c.prompt('/cost')}    ${c.dim('Show token usage and cost for this session')}`);
+  console.log(`  ${c.prompt('/login')}   ${c.dim('Set cloud credentials')}`);
+  console.log(`  ${c.prompt('/logout')}  ${c.dim('Clear cloud credentials')}`);
+  console.log(`  ${c.prompt('/statusline')} ${c.dim('Show the status line')}`);
+  console.log(`  ${c.prompt('/apply')}   ${c.dim('Apply a patch file')}`);
+  console.log(`  ${c.prompt('/fork')}    ${c.dim('Fork a new session off the current one')}`);
+  console.log(`  ${c.prompt('/audit')}   ${c.dim('Show the tool-call audit log')}`);
+  console.log(`  ${c.prompt('/vuln')}    ${c.dim('Scan the workspace for security vulnerabilities (defensive)')}`);
   console.log(`  ${c.prompt('/exit')}    ${c.dim('Exit the runtime')}`);
   console.log();
   console.log(`  ${c.bold('Available Tools (Model Can Invoke):')}`);

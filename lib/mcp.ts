@@ -21,6 +21,7 @@ import { FunctionTool } from "@google/adk";
 import { z } from "zod";
 import fs from "fs";
 import path from "path";
+import { withRetry } from "./retry.ts";
 
 interface McpServerConfig {
   command: string;
@@ -77,7 +78,7 @@ async function connect(serverName: string): Promise<McpConnection> {
     env: { ...process.env, ...(cfg.env || {}) },
   });
   const client = new Client({ name: "ollama-code", version: "1.0.0" });
-  await client.connect(transport);
+  await withRetry(() => client.connect(transport), { maxRetries: 2 });
 
   const toolsResult = await client.listTools();
   const tools: McpTool[] = (toolsResult.tools || []).map((t: any) => ({

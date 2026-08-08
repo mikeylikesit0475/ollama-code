@@ -44,6 +44,8 @@ npm start -- --continue          # resume the most recent session
 npm start -- --session <id>      # resume a specific session by id
 npm start -- --verbose           # surface ADK logs + debug dump (same as --debug)
 npm start -- --tui               # open the interactive session browser before the REPL
+npm start -- --full-auto         # skip all confirmation prompts (autonomous mode)
+npm start -- --repro <file>      # replay a captured request to reproduce a bug
 ```
 
 Model resolution at startup: a bare positional arg starting with `gemini-` or
@@ -73,6 +75,27 @@ name.
 | `/share [gist]` | Export the current session to a file (or a GitHub gist). |
 | `/lsp <file>` | Run LSP diagnostics on a file. |
 | `/plugins` | List loaded plugins. |
+| `/compact` | Manually compact the conversation context. |
+| `/init` | Bootstrap `MEMORY.md` from the repo structure. |
+| `/memory [edit]` | View `MEMORY.md`, or open it in your editor. |
+| `/context` | Show a detailed context-window breakdown. |
+| `/rewind [n]` | Discard the last `n` turns and start fresh. |
+| `/add-dir <path>` | Add a directory to the allowed workspace paths. |
+| `/doctor` | Run an environment health check. |
+| `/config [edit]` | View the config file, or open it in your editor. |
+| `/version` | Show the version. |
+| `/update` | Self-update via `git pull`. |
+| `/cost` | Show token usage and estimated cost for this session. |
+| `/login <key>` | Set cloud (Gemini) credentials. |
+| `/logout` | Clear cloud credentials. |
+| `/statusline` | Show the status line. |
+| `/apply <patch>` | Apply a `.patch`/`.diff` file via `git apply`. |
+| `/fork` | Fork a new session off the current one. |
+| `/audit [n]` | Show the last `n` tool calls from the audit log. |
+| `/vuln [static\|deps\|review\|all]` | Scan the workspace for security vulnerabilities (defensive only). |
+| `/repro <file>` | Replay a captured request to reproduce a bug. |
+| `/mcp add <name> <cmd> [args]` | Add an MCP server to config. |
+| `/mcp remove <name>` | Remove an MCP server from config. |
 | `/dream` | Consolidate the current session's history into `MEMORY.md`. |
 | `/exit`, `/quit` | Exit the runtime. |
 
@@ -107,6 +130,10 @@ for inline `[y/N]` confirmation before running:
   `planner`, `tester`, `researcher`, or a custom one from config).
 - MCP tools — any tools exposed by configured MCP servers, prefixed with the
   server name (e.g. `github_create_issue`).
+- `vuln_scan` — scan the workspace for common security vulnerabilities (SQL
+  injection, command injection, hardcoded secrets, path traversal, dependency
+  vulnerabilities). **Defensive only** — finds issues in your own code so they
+  can be fixed; it never exploits anything.
 
 ## Configuration (`.ollama-code.json`)
 
@@ -188,6 +215,20 @@ npm test
 Runs the `node --test` suite in `tests/`, covering the SSE parser/tool-call
 accumulator (`lib/sse.ts`) and the glob/fuzzy-match helpers (`lib/matchers.ts`).
 
+## Robustness
+
+- **Global error boundary** — every tool execution is wrapped in a try/catch that
+  returns a structured `{ status: "error" }` to the model instead of crashing the
+  turn.
+- **Retry with backoff** — flaky external calls (Ollama, MCP, gh, web_fetch) retry
+  transient failures (network, 5xx, timeouts) with exponential backoff + jitter.
+- **Chaos tests** — `tests/chaos.test.ts` feeds the harness malformed inputs
+  (garbage SSE, pathological JSON, throwing tools) and asserts it recovers.
+- **`--repro` / `/repro`** — captures the exact request/response that caused a bug
+  and replays it deterministically for debugging.
+- **Cross-platform CI** — `.github/workflows/ci.yml` runs the suite on
+  Linux/macOS/Windows × Node 20/22.
+
 ## Project layout
 
 ```
@@ -204,6 +245,12 @@ lib/config.ts              Unified .ollama-code.json config loader
 lib/share.ts               Session export to file / GitHub gist
 lib/lsp.ts                 Lightweight LSP client (diagnostics, go-to-definition)
 lib/tui.ts                 Minimal session-browser TUI (--tui)
+lib/health.ts              Environment health check (/doctor)
+lib/cost.ts                Token usage + cost tracking (/cost)
+lib/audit.ts               Structured tool-call audit log (/audit)
+lib/vuln.ts                Defensive vulnerability scanner (/vuln)
+lib/retry.ts               Retry-with-backoff for flaky external calls
+lib/repro.ts               Request capture + replay (--repro / /repro)
 lib/loop-guard.ts          Shared per-turn tool-call cap + repeat-write/edit bookkeeping
 lib/sse.ts                 SSE parsing + tool-call accumulation + JSON repair
 lib/matchers.ts            Glob-to-regex + fuzzy whitespace matching

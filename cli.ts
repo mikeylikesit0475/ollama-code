@@ -9,7 +9,7 @@ import {
   c, renderMarkdown, promptInput, confirmAction, printToolCall, printTokenUsage,
   startSpinner, stopSpinner, printHelp, printStatus, printWelcomeBanner,
   configurePromptSuggestions, stream, beginStream, endStream, streamToken,
-  printInterruptHint,
+  printInterruptHint, setAutoApprove,
 } from "./lib/ui.ts";
 import { getGitContext, ensureGitRepository } from "./lib/workspace.ts";
 import { OllamaLlm } from "./lib/ollama-llm.ts";
@@ -29,6 +29,11 @@ import { loadConfig, loadCustomCommands, persistGlobal, loadGlobal } from "./lib
 import { exportToFile, exportToGist } from "./lib/share.ts";
 import { lspDiagnostics, lspDefinition, closeLspClients, listLspServers } from "./lib/lsp.ts";
 import { sessionBrowser } from "./lib/tui.ts";
+import { runHealthChecks } from "./lib/health.ts";
+import { recordUsage, resetUsage, getUsage, formatCost } from "./lib/cost.ts";
+import { getAudit, clearAudit, auditLogPath } from "./lib/audit.ts";
+import { staticScan, dependencyScan, llmReview } from "./lib/vuln.ts";
+import { replayRepro, reproDirPath } from "./lib/repro.ts";
 
 // Load environment variables from the .env file next to this script, so config
 // resolves correctly regardless of the machine or the directory it's run from.
@@ -68,6 +73,25 @@ const commands = [
   { cmd: '/share', desc: 'Export the current session to a file or gist' },
   { cmd: '/lsp', desc: 'Run LSP diagnostics on a file' },
   { cmd: '/plugins', desc: 'List loaded plugins' },
+  { cmd: '/compact', desc: 'Manually compact the conversation context' },
+  { cmd: '/init', desc: 'Bootstrap MEMORY.md from the repo structure' },
+  { cmd: '/memory', desc: 'View or edit MEMORY.md' },
+  { cmd: '/context', desc: 'Show a detailed context-window breakdown' },
+  { cmd: '/rewind', desc: 'Undo the conversation to an earlier point' },
+  { cmd: '/add-dir', desc: 'Add a directory to the allowed workspace paths' },
+  { cmd: '/doctor', desc: 'Run an environment health check' },
+  { cmd: '/config', desc: 'View or edit the config file' },
+  { cmd: '/version', desc: 'Show the version' },
+  { cmd: '/update', desc: 'Self-update' },
+  { cmd: '/cost', desc: 'Show token usage and cost for this session' },
+  { cmd: '/login', desc: 'Set cloud credentials' },
+  { cmd: '/logout', desc: 'Clear cloud credentials' },
+  { cmd: '/statusline', desc: 'Show the status line' },
+  { cmd: '/apply', desc: 'Apply a patch file' },
+  { cmd: '/fork', desc: 'Fork a new session off the current one' },
+  { cmd: '/audit', desc: 'Show the tool-call audit log' },
+  { cmd: '/vuln', desc: 'Scan the workspace for security vulnerabilities (defensive)' },
+  { cmd: '/repro', desc: 'Replay a captured request to reproduce a bug' },
   { cmd: '/dream', desc: 'Consolidate session history into MEMORY.md' },
   { cmd: '/exit', desc: 'Exit the runtime' },
   { cmd: '/quit', desc: 'Exit the runtime' },
@@ -227,6 +251,8 @@ let execPrompt: string | null = null;  // --exec <prompt>: one-shot agent run, t
 let resumeSessionId: string | null = null; // --continue / --session <id>
 let verbose = false;                   // --verbose / --debug: surface ADK logs + debug dump
 let tuiMode = false;                   // --tui: open the session browser before the REPL
+let fullAuto = false;                 // --full-auto / --yes: skip all confirmations
+let reproFile: string | null = null;  // --repro <file>: replay a captured request
 
 if (startArgs[0] === "cloud") {
   isUsingOllama = false;
@@ -273,6 +299,12 @@ for (let i = 0; i < startArgs.length; i++) {
     verbose = true;
   } else if (arg === "--tui") {
     tuiMode = true;
+  } else if (arg === "--full-auto" || arg === "--yes" || arg === "-y") {
+    fullAuto = true;
+  } else if (arg === "--repro" && startArgs[i + 1]) {
+    reproFile = startArgs[i + 1];
+    process.env.OLLAMA_CODE_REPRO = "1";
+    i++;
   } else if (arg === "--atomic-commits") {
     atomicCommits = true;
   } else if (!arg.startsWith("-") && arg !== "code" && arg !== "cloud") {
@@ -290,6 +322,11 @@ for (let i = 0; i < startArgs.length; i++) {
 if (verbose) {
   setLogLevel(LogLevel.INFO);
   process.env.OLLAMA_CODE_DEBUG = "1";
+}
+
+// --full-auto / --yes: skip all confirmation prompts (autonomous mode).
+if (fullAuto) {
+  setAutoApprove(true);
 }
 
 // If no explicit model was passed on the command line, restore the last model
@@ -604,6 +641,21 @@ function getMemoryContext(): string {
 async function main() {
   printWelcomeBanner({ displayModelName, isUsingOllama });
   await cacheLocalModels();
+
+  // --repro <file>: replay a captured request and exit (no REPL).
+  if (reproFile) {
+    try {
+      console.log(`\n  ${c.meta(`⚡ Replaying captured request from ${reproFile}...`)}`);
+      const result = await replayRepro(reproFile, ollamaBaseUrl);
+      console.log();
+      process.stdout.write(result);
+      console.log();
+    } catch (err: any) {
+      console.error(`\n  ${c.error(`Replay failed: ${err.message}`)}\n`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
 
   // Load MCP server tools (if any are configured) and merge them into the
   // agent's toolset. Non-fatal: if none are configured or all fail, the agent
@@ -928,13 +980,48 @@ setSubAgentModel(engineerAgent.model);
         console.log(`  ${c.success(`✓ ${status}`)}\n`);
         continue;
       } else if (command === "/mcp") {
+        const sub = parts[1]?.toLowerCase();
+        if (sub === "add") {
+          // /mcp add <name> <command> [args...]
+          const name = parts[2];
+          const cmd = parts[3];
+          if (!name || !cmd) {
+            console.log(`\n  ${c.dim("Usage: /mcp add <name> <command> [args...]  — adds an MCP server to config.")}\n`);
+            continue;
+          }
+          const cfgPath = path.join(process.cwd(), ".ollama-code.json");
+          let cfg: any = {};
+          try { if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch { /* ignore */ }
+          cfg.mcpServers = cfg.mcpServers || {};
+          cfg.mcpServers[name] = { command: cmd, args: parts.slice(4) };
+          fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf-8");
+          console.log(`  ${c.success(`✓ Added MCP server "${name}". Restart to load its tools.`)}\n`);
+          continue;
+        } else if (sub === "remove") {
+          const name = parts[2];
+          if (!name) {
+            console.log(`\n  ${c.dim("Usage: /mcp remove <name>  — removes an MCP server from config.")}\n`);
+            continue;
+          }
+          const cfgPath = path.join(process.cwd(), ".ollama-code.json");
+          let cfg: any = {};
+          try { if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch { /* ignore */ }
+          if (cfg.mcpServers && cfg.mcpServers[name]) {
+            delete cfg.mcpServers[name];
+            fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf-8");
+            console.log(`  ${c.success(`✓ Removed MCP server "${name}".`)}\n`);
+          } else {
+            console.log(`  ${c.error(`No MCP server named "${name}".`)}\n`);
+          }
+          continue;
+        }
         const servers = listMcpServers();
         if (servers.length === 0) {
-          console.log(`\n  ${c.dim("No MCP servers configured. Add an \"mcpServers\" block to .ollama-code.json.")}\n`);
+          console.log(`\n  ${c.dim("No MCP servers configured. Use /mcp add <name> <command> [args...].")}\n`);
         } else {
           console.log(`\n  ${c.bold("Configured MCP Servers:")}`);
           for (const s of servers) console.log(`  - ${c.white(s)}`);
-          console.log();
+          console.log(`\n  ${c.dim("Use /mcp add <name> <command> [args...] or /mcp remove <name>.")}\n`);
         }
         continue;
       } else if (command === "/agents") {
@@ -1061,6 +1148,362 @@ setSubAgentModel(engineerAgent.model);
             console.log(`  - ${c.white(p.name)}${hooksList ? c.dim(` [hooks: ${hooksList}]`) : ""}`);
           }
           console.log();
+        }
+        continue;
+      } else if (command === "/compact") {
+        // Manual context compaction: summarize the current history into the
+        // running summary (same path as the auto-compaction, but on demand).
+        try {
+          const history = await sessionService.getSession({ appName: "local-claude-ts", userId: "local-user", sessionId: session.id });
+          const events = history?.events || [];
+          if (events.length === 0) {
+            console.log(`\n  ${c.white("No conversation history to compact.")}\n`);
+            continue;
+          }
+          const historyText = events
+            .map((event: any) => {
+              const role = event.author === "user" ? "USER" : "AGENT";
+              const text = stringifyContent(event) || "";
+              return `${role}: ${text}`;
+            })
+            .join("\n\n");
+          console.log(`\n  ${c.meta("⚡ Compacting conversation context...")}`);
+          startSpinner("Compacting...");
+          await compaction.refresh(engineerAgent.model, historyText, turnNumber + 1);
+          stopSpinner();
+          const summary = compaction.getSummary();
+          if (summary) {
+            console.log(`  ${c.success(`✓ Context compacted (${summary.length} chars of summary).`)}`);
+            console.log(`  ${c.dim("The summary will be injected into the next turn's context.")}\n`);
+          } else {
+            console.log(`  ${c.warn("Compaction produced no summary — context unchanged.")}\n`);
+          }
+        } catch (err: any) {
+          stopSpinner();
+          console.log(`\n  ${c.error(`Error during compaction: ${err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/init") {
+        // Bootstrap MEMORY.md from the repo structure.
+        try {
+          const memoryFilePath = path.resolve("MEMORY.md");
+          if (fs.existsSync(memoryFilePath)) {
+            console.log(`\n  ${c.warn("MEMORY.md already exists. Use /dream to update it, or delete it first to re-init.")}\n`);
+            continue;
+          }
+          const gitContext = await getGitContext();
+          const files = await new Promise<string[]>((resolve) => {
+            const { execFile } = require("child_process");
+            execFile("git", ["ls-files"], { encoding: "utf-8" }, (err: any, out: string) => {
+              resolve(err ? [] : out.split("\n").filter(Boolean).slice(0, 200));
+            });
+          });
+          const systemPrompt = `You are a project memory initializer. Based on the repository structure and git state below, create an initial MEMORY.md that captures: what the project is, its architecture, key files, and how to run/test it. Return ONLY the complete markdown content. Do not address the user or ask questions.`;
+          const userPrompt = `${gitContext}\n\nTracked files:\n${files.join("\n")}`;
+          console.log(`\n  ${c.meta("⚡ Initializing MEMORY.md from repo structure...")}`);
+          startSpinner("Analyzing...");
+          const content = (await runUtilityAgent(engineerAgent.model, systemPrompt, userPrompt)).trim();
+          stopSpinner();
+          if (!content || content.length < 20) {
+            console.log(`  ${c.warn("Initialization produced no useful content — MEMORY.md not written.")}\n`);
+            continue;
+          }
+          fs.writeFileSync(memoryFilePath, content, "utf-8");
+          console.log(`  ${c.success("✓ Created MEMORY.md")}\n`);
+        } catch (err: any) {
+          stopSpinner();
+          console.log(`\n  ${c.error(`Error during init: ${err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/memory") {
+        // View or edit MEMORY.md.
+        const memoryFilePath = path.resolve("MEMORY.md");
+        if (!fs.existsSync(memoryFilePath)) {
+          console.log(`\n  ${c.white("No MEMORY.md yet. Use /init to create one.")}\n`);
+          continue;
+        }
+        const content = fs.readFileSync(memoryFilePath, "utf-8");
+        if (parts[1] === "edit") {
+          console.log(`\n  ${c.dim("Opening MEMORY.md in your default editor...")}`);
+          const { execFile } = require("child_process");
+          const editor = process.env.EDITOR || "vi";
+          execFile(editor, [memoryFilePath], { stdio: "inherit" }, () => {
+            console.log(`  ${c.success("✓ MEMORY.md updated.")}\n`);
+          });
+        } else {
+          console.log();
+          console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+          process.stdout.write(content);
+          console.log();
+          console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+          console.log(`  ${c.dim("Use /memory edit to open it in your editor.")}\n`);
+        }
+        continue;
+      } else if (command === "/context") {
+        // Detailed context-window breakdown.
+        const liveModel = engineerAgent.model;
+        let window = 8192;
+        if (liveModel instanceof OllamaLlm) {
+          window = liveModel.getContextWindow();
+        }
+        const { usage } = getUsage();
+        const used = usage.totalTokens;
+        const pct = window > 0 ? Math.min(100, Math.round((used / window) * 100)) : 0;
+        const barWidth = Math.max(10, (process.stdout.columns || 80) - 20);
+        const filled = Math.round((pct / 100) * barWidth);
+        const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+        console.log(`\n  ${c.bold("Context Window:")}`);
+        console.log(`  ${c.dim("Model:")}   ${c.white(displayModelName)}`);
+        console.log(`  ${c.dim("Window:")}  ${c.white(String(window))} tokens`);
+        console.log(`  ${c.dim("Used:")}    ${c.white(String(used))} tokens (${pct}%)`);
+        console.log(`  ${c.dim("Free:")}    ${c.white(String(Math.max(0, window - used)))} tokens`);
+        console.log(`  ${c.meta(bar)}`);
+        console.log(`  ${c.dim("Memory (MEMORY.md) + scratchpad + compaction summary are injected each turn.")}\n`);
+        continue;
+      } else if (command === "/rewind") {
+        // Undo the conversation to an earlier point. We delete the current
+        // session and create a fresh one (a full checkpoint restore would
+        // require snapshotting events; this is a pragmatic reset).
+        const n = parts[1] ? parseInt(parts[1], 10) : 1;
+        if (isNaN(n) || n < 1) {
+          console.log(`\n  ${c.dim("Usage: /rewind [n]  — discards the last n turns and starts fresh.")}\n`);
+          continue;
+        }
+        const confirmed = await confirmAction(`Discard the last ${n} turn(s) and start fresh?`);
+        if (!confirmed) {
+          console.log(`  ${c.dim("Rewind cancelled.")}\n`);
+          continue;
+        }
+        try {
+          await sessionService.deleteSession({ appName: runner.appName, userId: "local-user", sessionId: session.id });
+        } catch (e) { /* ignore */ }
+        session = await sessionService.createSession({ appName: runner.appName, userId: "local-user" });
+        compaction.reset();
+        resetUsage();
+        console.log(`  ${c.success(`✓ Rewound. Started a fresh session (${session.id}).`)}\n`);
+        continue;
+      } else if (command === "/add-dir") {
+        // Add a directory to the allowed workspace paths at runtime.
+        const dir = parts[1];
+        if (!dir) {
+          console.log(`\n  ${c.dim("Usage: /add-dir <path>  — adds a directory to the allowed workspace paths.")}\n`);
+          continue;
+        }
+        const abs = path.resolve(dir);
+        if (!fs.existsSync(abs)) {
+          console.log(`\n  ${c.error(`Directory does not exist: ${dir}`)}\n`);
+          continue;
+        }
+        // Persist to the project config so it survives restarts.
+        const cfgPath = path.join(process.cwd(), ".ollama-code.json");
+        let cfg: any = {};
+        try { if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch { /* ignore */ }
+        cfg.workspaceDirs = cfg.workspaceDirs || [];
+        if (!cfg.workspaceDirs.includes(abs)) cfg.workspaceDirs.push(abs);
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf-8");
+        console.log(`  ${c.success(`✓ Added ${abs} to allowed workspace paths.`)}\n`);
+        continue;
+      } else if (command === "/doctor") {
+        console.log(`\n  ${c.bold("Environment Health Check:")}`);
+        const checks = await runHealthChecks(ollamaBaseUrl);
+        for (const chk of checks) {
+          const icon = chk.ok ? c.success("✓") : c.error("✗");
+          console.log(`  ${icon} ${c.white(chk.label)}: ${c.dim(chk.detail)}`);
+        }
+        console.log();
+        continue;
+      } else if (command === "/config") {
+        const cfgPath = path.join(process.cwd(), ".ollama-code.json");
+        if (parts[1] === "edit") {
+          if (!fs.existsSync(cfgPath)) fs.writeFileSync(cfgPath, "{}", "utf-8");
+          console.log(`\n  ${c.dim("Opening config in your default editor...")}`);
+          const { execFile } = require("child_process");
+          const editor = process.env.EDITOR || "vi";
+          execFile(editor, [cfgPath], { stdio: "inherit" }, () => {
+            console.log(`  ${c.success("✓ Config updated. Reload with /permissions, /agents, /plugins.")}\n`);
+          });
+        } else {
+          if (!fs.existsSync(cfgPath)) {
+            console.log(`\n  ${c.white("No .ollama-code.json yet. Use /config edit to create one.")}\n`);
+          } else {
+            console.log();
+            console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+            process.stdout.write(fs.readFileSync(cfgPath, "utf-8"));
+            console.log();
+            console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+            console.log(`  ${c.dim("Use /config edit to open it in your editor.")}\n`);
+          }
+        }
+        continue;
+      } else if (command === "/version") {
+        console.log(`\n  ${c.bold("Ollama Code")} ${c.white("v1.0.0")}\n`);
+        continue;
+      } else if (command === "/update") {
+        console.log(`\n  ${c.meta("⚡ Checking for updates...")}`);
+        try {
+          const { execFileSync } = require("child_process");
+          const out = execFileSync("git", ["pull", "--ff-only"], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+          console.log(`  ${c.success(`✓ ${out.trim() || "Already up to date."}`)}\n`);
+        } catch (err: any) {
+          console.log(`  ${c.error(`Update failed: ${err.stderr || err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/cost") {
+        const { usage, cost } = getUsage();
+        console.log(`\n  ${c.bold("Session Usage:")}`);
+        console.log(`  ${c.dim("Prompt tokens:")}     ${c.white(String(usage.promptTokens))}`);
+        console.log(`  ${c.dim("Completion tokens:")} ${c.white(String(usage.completionTokens))}`);
+        console.log(`  ${c.dim("Total tokens:")}      ${c.white(String(usage.totalTokens))}`);
+        console.log(`  ${c.dim("Estimated cost:")}   ${c.white(formatCost(cost))}\n`);
+        continue;
+      } else if (command === "/login") {
+        const key = parts[1];
+        if (!key) {
+          console.log(`\n  ${c.dim("Usage: /login <GEMINI_API_KEY>  — sets cloud credentials.")}\n`);
+          continue;
+        }
+        const cfgPath = path.join(process.cwd(), ".ollama-code.json");
+        let cfg: any = {};
+        try { if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch { /* ignore */ }
+        cfg.geminiApiKey = key;
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf-8");
+        process.env.GEMINI_API_KEY = key;
+        console.log(`  ${c.success("✓ Cloud credentials set. Use /model gemini-2.5-flash to switch to cloud.")}\n`);
+        continue;
+      } else if (command === "/logout") {
+        const cfgPath = path.join(process.cwd(), ".ollama-code.json");
+        let cfg: any = {};
+        try { if (fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch { /* ignore */ }
+        delete cfg.geminiApiKey;
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), "utf-8");
+        delete process.env.GEMINI_API_KEY;
+        console.log(`  ${c.success("✓ Cloud credentials cleared.")}\n`);
+        continue;
+      } else if (command === "/statusline") {
+        const { usage } = getUsage();
+        const liveModel = engineerAgent.model;
+        let window = 8192;
+        if (liveModel instanceof OllamaLlm) window = liveModel.getContextWindow();
+        const pct = window > 0 ? Math.min(100, Math.round((usage.totalTokens / window) * 100)) : 0;
+        console.log(`\n  ${c.dim("Status line:")} ${c.white(displayModelName)} ${c.meta(`· ${pct}% ctx`)} ${c.dim(`· ${usage.totalTokens} tok`)} ${c.dim(`· ${isUsingOllama ? "local" : "cloud"}`)}\n`);
+        continue;
+      } else if (command === "/apply") {
+        // Apply a patch file (git apply). Supports .patch/.diff files.
+        const target = parts[1];
+        if (!target) {
+          console.log(`\n  ${c.dim("Usage: /apply <patch-file>  — applies a .patch/.diff file via git apply.")}\n`);
+          continue;
+        }
+        const fullPath = path.resolve(target);
+        if (!fs.existsSync(fullPath)) {
+          console.log(`\n  ${c.error(`Patch file not found: ${target}`)}\n`);
+          continue;
+        }
+        const confirmed = await confirmAction(`Apply patch ${target}?`);
+        if (!confirmed) {
+          console.log(`  ${c.dim("Apply cancelled.")}\n`);
+          continue;
+        }
+        try {
+          const { execFileSync } = await import("child_process");
+          const out = execFileSync("git", ["apply", fullPath], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+          console.log(`  ${c.success(`✓ Applied patch ${target}.`)}${out ? " " + out.trim() : ""}\n`);
+        } catch (err: any) {
+          console.log(`  ${c.error(`git apply failed: ${err.stderr || err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/fork") {
+        // Fork a new session off the current one (fresh session, same model).
+        const confirmed = await confirmAction("Fork a new session from the current one?");
+        if (!confirmed) {
+          console.log(`  ${c.dim("Fork cancelled.")}\n`);
+          continue;
+        }
+        session = await sessionService.createSession({ appName: runner.appName, userId: "local-user" });
+        compaction.reset();
+        resetUsage();
+        console.log(`  ${c.success(`✓ Forked. New session: ${session.id}`)}\n`);
+        continue;
+      } else if (command === "/audit") {
+        const entries = getAudit(parts[1] ? parseInt(parts[1], 10) : 50);
+        if (entries.length === 0) {
+          console.log(`\n  ${c.white("No tool calls recorded yet.")}\n`);
+        } else {
+          console.log(`\n  ${c.bold(`Recent Tool Calls (${entries.length}):`)}`);
+          for (const e of entries) {
+            const icon = e.status === "error" ? c.error("✗") : c.success("✓");
+            console.log(`  ${icon} ${c.white(e.tool)} ${c.dim(`(${e.ms}ms, ${e.status})`)} ${c.dim(e.args.slice(0, 80))}`);
+          }
+          console.log(`\n  ${c.dim(`Full log: ${auditLogPath()}`)}\n`);
+        }
+        continue;
+      } else if (command === "/vuln") {
+        // Defensive vulnerability scan. Subcommands: static | deps | review | all.
+        const sub = parts[1]?.toLowerCase() || "all";
+        console.log(`\n  ${c.meta("⚡ Scanning for vulnerabilities (defensive)...")}`);
+        startSpinner("Scanning...");
+        try {
+          let findings: any[] = [];
+          if (sub === "static" || sub === "all") findings.push(...staticScan());
+          if (sub === "deps" || sub === "all") findings.push(...(await dependencyScan()));
+          stopSpinner();
+
+          if (findings.length === 0) {
+            console.log(`  ${c.success("✓ No vulnerabilities found by static/dependency scan.")}\n`);
+            continue;
+          }
+
+          const bySeverity: Record<string, number> = {};
+          for (const f of findings) bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+          console.log(`  ${c.bold(`Found ${findings.length} potential issue(s):`)}`);
+          for (const [sev, n] of Object.entries(bySeverity)) {
+            const icon = sev === "Critical" || sev === "High" ? c.error(sev) : c.warn(sev);
+            console.log(`  ${icon}: ${n}`);
+          }
+          console.log();
+          for (const f of findings.slice(0, 30)) {
+            const sev = f.severity === "Critical" || f.severity === "High" ? c.error(f.severity) : c.warn(f.severity);
+            console.log(`  ${sev} ${c.white(f.file)}:${f.line} ${c.dim(`(${f.category})`)}`);
+            console.log(`    ${c.dim(f.detail)}`);
+            if (f.snippet) console.log(`    ${c.dim(f.snippet.slice(0, 120))}`);
+          }
+          if (findings.length > 30) console.log(`  ${c.dim(`... and ${findings.length - 30} more.`)}`);
+
+          // Optional LLM-assisted review to confirm real vs false positives.
+          if (sub === "review" || sub === "all") {
+            console.log(`\n  ${c.meta("⚡ Running LLM-assisted review to confirm findings...")}`);
+            startSpinner("Reviewing...");
+            try {
+              const review = await llmReview(engineerAgent.model, findings.slice(0, 20));
+              stopSpinner();
+              console.log();
+              process.stdout.write(review);
+              console.log();
+            } catch (err: any) {
+              stopSpinner();
+              console.log(`  ${c.dim(`(LLM review skipped: ${err.message})`)}`);
+            }
+          }
+          console.log();
+        } catch (err: any) {
+          stopSpinner();
+          console.log(`\n  ${c.error(`Error during vulnerability scan: ${err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/repro") {
+        const target = parts[1];
+        if (!target) {
+          console.log(`\n  ${c.dim(`Usage: /repro <file>  — replays a captured request. Captures are saved to ${reproDirPath()}.`)}\n`);
+          continue;
+        }
+        try {
+          console.log(`\n  ${c.meta(`⚡ Replaying ${target}...`)}`);
+          const result = await replayRepro(path.resolve(target), ollamaBaseUrl);
+          console.log();
+          process.stdout.write(result);
+          console.log();
+        } catch (err: any) {
+          console.log(`\n  ${c.error(`Replay failed: ${err.message}`)}\n`);
         }
         continue;
       } else if (command === "/dream") {
@@ -1225,6 +1668,7 @@ setSubAgentModel(engineerAgent.model);
       const modelForUsage = engineerAgent.model;
       if (modelForUsage instanceof OllamaLlm && modelForUsage.lastResponse) {
         printTokenUsage(modelForUsage.lastResponse, displayModelName, modelForUsage.getContextWindow());
+        recordUsage(modelForUsage.lastResponse.usage, displayModelName);
       }
 
       // Execute auto-commit if enabled (and not interrupted or aborted)

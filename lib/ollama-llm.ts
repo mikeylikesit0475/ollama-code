@@ -6,6 +6,8 @@ import fs from "fs";
 import path from "path";
 import { createSseParser, ToolCallAccumulator, safeParseToolArguments } from "./sse.ts";
 import { c } from "./ui.ts";
+import { withRetry } from "./retry.ts";
+import { captureRepro } from "./repro.ts";
 
 // Per-model sampling params for local Ollama models (Ticket 4).
 // Replaces the old hardcoded greedy values (top_k:1, top_p:0.1) that amplified
@@ -290,6 +292,10 @@ export class OllamaLlm extends BaseLlm {
     const data: any = { choices: [{ message }], usage, model: modelVersion };
     this.lastResponse = data;
 
+    // Repro capture (gated by OLLAMA_CODE_REPRO / --repro): save the exact
+    // request/response so a failure can be replayed deterministically.
+    captureRepro(this.model, requestBody, data);
+
     // Debug dump (gated by OLLAMA_CODE_DEBUG): capture the full request ADK sent
     // (is the system prompt even there? how many tools?) and the full model
     // response (content, reasoning, tool calls) so we can diagnose why the model
@@ -403,12 +409,15 @@ export class OllamaLlm extends BaseLlm {
   // to the previous best guess so the footer still renders.
   async refreshContextWindow(): Promise<number> {
     try {
-      const res = await fetch(`${this.baseUrl}/api/show`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: this.model }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await withRetry(async () => {
+        const r = await fetch(`${this.baseUrl}/api/show`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: this.model }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r;
+      }, { maxRetries: 2 });
       const info = await res.json();
       // Ollama exposes the model's native context length under llama.context_length.
       const native = info?.model_info?.["llama.context_length"];
