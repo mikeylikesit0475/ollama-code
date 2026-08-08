@@ -18,6 +18,7 @@ import { resetLoopGuard, loopGuard } from "./lib/loop-guard.ts";
 import { generatePlan, renderPlan } from "./lib/planner.ts";
 import { summarizeHistory } from "./lib/summarizer.ts";
 import { scratchpad } from "./lib/scratchpad.ts";
+import { compaction } from "./lib/compaction.ts";
 
 // Load environment variables from the .env file next to this script, so config
 // resolves correctly regardless of the machine or the directory it's run from.
@@ -500,13 +501,20 @@ async function handleAutoDream(sessionService: any, sessionId: string, silent = 
       existingMemory = fs.readFileSync(memoryFilePath, "utf-8");
     }
 
-    const historyText = history.events
-      .map((event: any) => {
-        const role = event.author === "user" ? "USER" : "AGENT";
-        const text = stringifyContent(event) || "";
-        return `${role}: ${text}`;
-      })
-      .join("\n\n");
+    // Prefer the running-summary compaction output when available: it is already
+    // a compact, semantic summary of the conversation that survives truncation,
+    // so it fits the local model's context window even on very long sessions.
+    // Fall back to the raw session history only when no summary exists yet.
+    const compactedSummary = compaction.getSummary();
+    const historyText = compactedSummary
+      ? `(compacted running summary of the session)\n${compactedSummary}`
+      : history.events
+          .map((event: any) => {
+            const role = event.author === "user" ? "USER" : "AGENT";
+            const text = stringifyContent(event) || "";
+            return `${role}: ${text}`;
+          })
+          .join("\n\n");
 
     const systemPrompt = `You are a project memory consolidation engine (Auto-Dream).
 Your task is to analyze the recent conversation history and update/consolidate the persistent project memory file: MEMORY.md.
@@ -517,7 +525,9 @@ Guidelines:
 3. Keep the MEMORY.md file clean, highly organized, and capped at an efficient 200 lines.
 4. Merge recent insights into the existing memory structure without deleting critical old knowledge.
 5. Return ONLY the complete, raw markdown content for the MEMORY.md file. No markdown code blocks surrounding the output, no talking.
-6. This file is read back into your own context on every future turn — it is a private note to yourself, not a message to the user. Never address the user directly, ask a question, or propose next steps for them to approve (no "Shall I...", "Would you like...", or trailing questions). State facts and decisions only.`;
+6. This file is read back into your own context on every future turn — it is a private note to yourself, not a message to the user. Never address the user directly, ask a question, or propose next steps for them to approve (no "Shall I...", "Would you like...", or trailing questions). State facts and decisions only.
+
+Note: The "Recent History" below may be a compacted running summary rather than the verbatim transcript. Treat it as authoritative — it already preserves the important facts, decisions, and current state of the work.`;
 
     const userPrompt = `Existing Memory:\n${existingMemory}\n\nRecent History:\n${historyText}`;
 
@@ -559,7 +569,10 @@ function getMemoryContext(): string {
     }
   }
   const scratchpadText = scratchpad.getContextPrompt();
-  return memoryText + (scratchpadText ? `\n${scratchpadText}` : "");
+  const compactionText = compaction.getContextPrompt();
+  return memoryText
+    + (scratchpadText ? `\n${scratchpadText}` : "")
+    + (compactionText ? `\n${compactionText}` : "");
 }
 
 // ─── Main Loop ──────────────────────────────────────────────────────────────
@@ -620,7 +633,9 @@ async function main() {
     // Else: ignore. /exit is the way out.
   });
 
+  let turnNumber = 0;
   while (true) {
+    turnNumber++;
     console.log(c.border('─'.repeat(process.stdout.columns || 80)));
     let userInput = await promptInput(`${c.prompt('❯')} `);
 
@@ -887,6 +902,30 @@ async function main() {
         } else {
           // In cloud mode, run asynchronously and silently in the background
           handleAutoDream(sessionService, session.id, true).catch(() => {});
+        }
+      }
+
+      // Running-summary compaction (local mode): after the main turn finishes,
+      // refresh a compact summary of the conversation. This runs SEQUENTIALLY
+      // (the main LLM call is done), so it does not collide with the
+      // OLLAMA_NUM_PARALLEL=1 constraint. The summary is injected into the next
+      // turn's prompt via getMemoryContext(), so it survives TruncatingContextCompactor
+      // dropping the raw oldest events.
+      if (!interrupted && !loopGuard.halted && isUsingOllama) {
+        try {
+          const history = await sessionService.getSession({ appName: "local-claude-ts", userId: "local-user", sessionId: session.id });
+          if (history && history.events && history.events.length > 4) {
+            const historyText = history.events
+              .map((event: any) => {
+                const role = event.author === "user" ? "USER" : "AGENT";
+                const text = stringifyContent(event) || "";
+                return `${role}: ${text}`;
+              })
+              .join("\n\n");
+            await compaction.refresh(engineerAgent.model, historyText, turnNumber);
+          }
+        } catch (e) {
+          // Non-fatal: keep the previous summary.
         }
       }
 
