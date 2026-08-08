@@ -9,6 +9,7 @@ import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from ".
 import { MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
 import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
 import { isSandboxEnabled, wrapCommand } from "../sandbox.ts";
+import { confirmOrAllow } from "../permissions.ts";
 
 export interface BackgroundJob {
   process: any;
@@ -75,10 +76,18 @@ export const runBackgroundCommand = new FunctionTool({
       }
     }
 
-    const confirmed = await confirmAction(
-      escapesWorkspace ? `Allow starting OUT-OF-WORKSPACE background job '${jobId}'?` : `Allow starting background job '${jobId}'?`
+    const confirmed = await confirmOrAllow(
+      "run_background_command",
+      { command, jobId, cwd },
+      () => confirmAction(
+        escapesWorkspace ? `Allow starting OUT-OF-WORKSPACE background job '${jobId}'?` : `Allow starting background job '${jobId}'?`
+      )
     );
-    if (!confirmed) {
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted background command execution." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted background command execution." };
     }
@@ -193,8 +202,12 @@ export const killBackgroundJob = new FunctionTool({
       return { status: "success", message: `Job '${jobId}' has already finished.` };
     }
 
-    const confirmed = await confirmAction(`Kill background job '${jobId}'?`);
-    if (!confirmed) {
+    const confirmed = await confirmOrAllow("kill_background_job", { jobId }, () => confirmAction(`Kill background job '${jobId}'?`));
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted kill operation." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted kill operation." };
     }

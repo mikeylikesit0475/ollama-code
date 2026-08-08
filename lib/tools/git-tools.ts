@@ -6,6 +6,7 @@ import { execFileSync, execSync } from "child_process";
 import path from "path";
 import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from "../ui.ts";
 import { isPathInWorkspace, ensureGitRepository } from "../workspace.ts";
+import { confirmOrAllow } from "../permissions.ts";
 
 // Tool 7: git_commit with inline confirmation
 export const gitCommit = new FunctionTool({
@@ -23,9 +24,13 @@ export const gitCommit = new FunctionTool({
       return { status: "error", message: "Git is not initialized in this directory. Please ask the user to initialize git first." };
     }
 
-    const confirmed = await confirmAction("Commit changes?");
+    const confirmed = await confirmOrAllow("git_commit", { message }, () => confirmAction("Commit changes?"));
 
-    if (!confirmed) {
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted Git commit." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted Git commit." };
     }
@@ -78,8 +83,12 @@ export const gitAdd = new FunctionTool({
     }
 
     const relativeDisplayPath = path.relative(process.cwd(), fullPath) || filePath;
-    const confirmed = await confirmAction(`Stage ${relativeDisplayPath}?`);
-    if (!confirmed) {
+    const confirmed = await confirmOrAllow("git_add", { path: filePath }, () => confirmAction(`Stage ${relativeDisplayPath}?`));
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted Git add." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted Git add." };
     }
@@ -148,8 +157,12 @@ export const gitRestore = new FunctionTool({
       return { status: "error", message: "Access Denied: Path is outside workspace." };
     }
 
-    const confirmed = await confirmAction(`Are you sure you want to discard all uncommitted changes in '${filePath}'?`);
-    if (!confirmed) {
+    const confirmed = await confirmOrAllow("git_restore", { path: filePath }, () => confirmAction(`Are you sure you want to discard all uncommitted changes in '${filePath}'?`));
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted git restore operation." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted git restore operation." };
     }

@@ -5,6 +5,10 @@ export * from "./web-tools.ts";
 export * from "./search-tools.ts";
 export * from "./git-tools.ts";
 export * from "./delegate-tool.ts";
+export * from "./gh-tools.ts";
+export * from "../indexer.ts";
+export * from "../subagents.ts";
+export * from "../mcp.ts";
 
 import { executeBash } from "./exec-tools.ts";
 import { readFile, readFiles, writeFile, editFile, listDir, globFilesTool } from "./fs-tools.ts";
@@ -13,6 +17,9 @@ import { webFetch, todoWrite } from "./web-tools.ts";
 import { grepSearch } from "./search-tools.ts";
 import { gitCommit, gitStatus, gitAdd, gitDiff, gitLog, gitRestore } from "./git-tools.ts";
 import { delegateTask } from "./delegate-tool.ts";
+import { ghPr, ghIssue, ghComment } from "./gh-tools.ts";
+import { semanticSearchTool } from "../indexer.ts";
+import { delegateToAgent } from "../subagents.ts";
 
 function wrapToolWithMalformedGuard(tool: any) {
   const originalExecute = tool.execute.bind(tool);
@@ -51,5 +58,10 @@ export const allTools = [
   webFetch,
   todoWrite,
   delegateTask,
+  semanticSearchTool,
+  ghPr,
+  ghIssue,
+  ghComment,
+  delegateToAgent,
 ].map(wrapToolWithMalformedGuard);
 

@@ -10,6 +10,7 @@ import { isPathInWorkspace, globFiles, listDirRecursive, GLOB_MAX_RESULTS } from
 import { loopGuard, MAX_TOOL_CALLS_PER_TURN, exceedsToolCallCap } from "../loop-guard.ts";
 import { postWriteVerify } from "../verify.ts";
 import { scratchpad } from "../scratchpad.ts";
+import { confirmOrAllow } from "../permissions.ts";
 
 // Shared by read_file and read_files: guards against a single tool call
 // reading a huge file (e.g. 50MB) entirely into memory, and against returning
@@ -142,9 +143,17 @@ export const writeFile = new FunctionTool({
     printToolResult(preview + (content.length > 500 ? "\n  ... (truncated)" : ""));
 
     const relativeDisplayPath = path.relative(process.cwd(), fullPath) || filePath;
-    const confirmed = await confirmAction(`Write to ${relativeDisplayPath}?`);
+    const confirmed = await confirmOrAllow(
+      "write_file",
+      { path: filePath },
+      () => confirmAction(`Write to ${relativeDisplayPath}?`)
+    );
 
-    if (!confirmed) {
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted file write operation." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted file write operation." };
     }
@@ -294,9 +303,17 @@ export const editFile = new FunctionTool({
       printDiff(edit.oldText, edit.newText);
     }
 
-    const confirmed = await confirmAction(`Apply ${editsToApply.length} changes to ${relativeDisplayPath}?`);
+    const confirmed = await confirmOrAllow(
+      "edit_file",
+      { path: filePath },
+      () => confirmAction(`Apply ${editsToApply.length} changes to ${relativeDisplayPath}?`)
+    );
 
-    if (!confirmed) {
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted file edit operation." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted file edit operation." };
     }

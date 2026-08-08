@@ -13,7 +13,7 @@ import {
 } from "./lib/ui.ts";
 import { getGitContext, ensureGitRepository } from "./lib/workspace.ts";
 import { OllamaLlm } from "./lib/ollama-llm.ts";
-import { allTools, killAllBackgroundJobs, setDelegateModel } from "./lib/tools/index.ts";
+import { allTools, killAllBackgroundJobs, setDelegateModel, setSubAgentModel, loadMcpTools, closeMcpConnections, listMcpServers } from "./lib/tools/index.ts";
 import { resetLoopGuard, loopGuard } from "./lib/loop-guard.ts";
 import { isSandboxEnabled, setSandboxEnabled, isBwrapAvailable } from "./lib/sandbox.ts";
 import { generatePlan, renderPlan } from "./lib/planner.ts";
@@ -21,6 +21,14 @@ import { summarizeHistory } from "./lib/summarizer.ts";
 import { scratchpad } from "./lib/scratchpad.ts";
 import { compaction } from "./lib/compaction.ts";
 import { runUtilityAgent } from "./lib/utility.ts";
+import { buildIndex } from "./lib/indexer.ts";
+import { reloadPermissions, checkPermission } from "./lib/permissions.ts";
+import { listSubAgents, reloadSubAgents } from "./lib/subagents.ts";
+import { reloadPlugins, hooks, listPlugins } from "./lib/plugins.ts";
+import { loadConfig, loadCustomCommands, persistGlobal, loadGlobal } from "./lib/config.ts";
+import { exportToFile, exportToGist } from "./lib/share.ts";
+import { lspDiagnostics, lspDefinition, closeLspClients, listLspServers } from "./lib/lsp.ts";
+import { sessionBrowser } from "./lib/tui.ts";
 
 // Load environment variables from the .env file next to this script, so config
 // resolves correctly regardless of the machine or the directory it's run from.
@@ -48,10 +56,28 @@ const commands = [
   { cmd: '/model', desc: 'Change active LLM model' },
   { cmd: '/sandbox', desc: 'Toggle sandboxing of execute_bash (bwrap)' },
   { cmd: '/review', desc: 'Run adversarial code review on active diff' },
+  { cmd: '/review-diff', desc: 'Review the full diff and accept or discard it' },
+  { cmd: '/explain', desc: 'Explain a file or code section' },
+  { cmd: '/fix', desc: 'Fix a bug or error in the codebase' },
+  { cmd: '/tests', desc: 'Write or run tests for a target' },
+  { cmd: '/index', desc: 'Build the semantic search index' },
+  { cmd: '/gh', desc: 'Run a GitHub CLI command (pr/issue/comment)' },
+  { cmd: '/permissions', desc: 'Reload and show permission rules' },
+  { cmd: '/agents', desc: 'List available sub-agents' },
+  { cmd: '/mcp', desc: 'List configured MCP servers' },
+  { cmd: '/share', desc: 'Export the current session to a file or gist' },
+  { cmd: '/lsp', desc: 'Run LSP diagnostics on a file' },
+  { cmd: '/plugins', desc: 'List loaded plugins' },
   { cmd: '/dream', desc: 'Consolidate session history into MEMORY.md' },
   { cmd: '/exit', desc: 'Exit the runtime' },
   { cmd: '/quit', desc: 'Exit the runtime' },
 ];
+
+// Merge user-defined custom commands from config into the autocomplete list.
+const customCommands = loadCustomCommands();
+for (const cc of customCommands) {
+  commands.push({ cmd: '/' + cc.name, desc: cc.description });
+}
 
 // ─── Clipboard helper (used by /paste) ─────────────────────────────────────
 // Reads clipboard text cross-platform. Returns "" when no clipboard tool is
@@ -162,61 +188,31 @@ const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 let atomicCommits = process.env.GIT_AUTO_COMMIT === "true";
 
 // ─── Persisted model choice (Ticket 5) ─────────────────────────────────────
-// The last model selected via /model (or --model) is written to a small JSON
+// The last model selected via /model (or --model) is written to the global
 // config file so it survives restarts. On boot we read it back and prefer it
 // over the default, so switching models isn't lost every time the CLI exits.
 const configDir = path.join(process.env.HOME || process.cwd(), ".ollama-code");
 const configPath = path.join(configDir, "config.json");
 
 function loadPersistedModel(): { model: string; cloud: boolean } | null {
-  try {
-    if (fs.existsSync(configPath)) {
-      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      if (raw && typeof raw.model === "string" && raw.model) {
-        return { model: raw.model, cloud: !!raw.cloud };
-      }
-    }
-  } catch (e) {
-    // Corrupt/missing config — fall back to defaults.
-  }
+  const g = loadGlobal();
+  if (g.model) return { model: g.model, cloud: !!g.cloud };
   return null;
 }
 
 function persistModel(model: string, cloud: boolean) {
-  try {
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(configPath, JSON.stringify({ model, cloud }, null, 2), "utf-8");
-  } catch (e) {
-    // Non-fatal: persistence is best-effort.
-  }
+  persistGlobal(model, cloud, isSandboxEnabled());
 }
 
 // Persist the sandbox toggle alongside the model choice so it survives restarts.
 function persistSandbox(enabled: boolean) {
-  try {
-    fs.mkdirSync(configDir, { recursive: true });
-    const existing = loadPersistedModel();
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({ model: existing?.model ?? null, cloud: existing?.cloud ?? false, sandbox: enabled }, null, 2),
-      "utf-8"
-    );
-  } catch (e) {
-    // Non-fatal: persistence is best-effort.
-  }
+  const g = loadGlobal();
+  persistGlobal(g.model || ollamaModelName, g.cloud ?? false, enabled);
 }
 
 // Read the persisted sandbox flag (defaults to OFF) and apply it at boot.
 function loadPersistedSandbox(): boolean {
-  try {
-    if (fs.existsSync(configPath)) {
-      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      if (raw && typeof raw.sandbox === "boolean") return raw.sandbox;
-    }
-  } catch (e) {
-    // Corrupt/missing config — default to OFF.
-  }
-  return false;
+  return loadGlobal().sandbox ?? false;
 }
 
 // Parse command line arguments for custom model flag or cloud execution mode
@@ -224,6 +220,13 @@ const startArgs = process.argv.slice(2);
 // True when the user passed any model/mode-related CLI arg, so we don't
 // override it with the persisted model choice below.
 let modelExplicitlySet = false;
+
+// Non-interactive / mode flags (Copilot-CLI-style ergonomics).
+let askPrompt: string | null = null;   // --ask <prompt>: one-shot Q&A, no tools/session
+let execPrompt: string | null = null;  // --exec <prompt>: one-shot agent run, then exit
+let resumeSessionId: string | null = null; // --continue / --session <id>
+let verbose = false;                   // --verbose / --debug: surface ADK logs + debug dump
+let tuiMode = false;                   // --tui: open the session browser before the REPL
 
 if (startArgs[0] === "cloud") {
   isUsingOllama = false;
@@ -236,7 +239,8 @@ if (startArgs[0] === "cloud") {
 }
 
 for (let i = 0; i < startArgs.length; i++) {
-  if (startArgs[i] === "--model" && startArgs[i + 1]) {
+  const arg = startArgs[i];
+  if (arg === "--model" && startArgs[i + 1]) {
     const val = startArgs[i + 1];
     if (val === "cloud" || val === "gemini") {
       isUsingOllama = false;
@@ -246,23 +250,46 @@ for (let i = 0; i < startArgs.length; i++) {
     }
     modelExplicitlySet = true;
     i++;
-  } else if (startArgs[i] === "--cloud" || startArgs[i] === "cloud") {
+  } else if (arg === "--cloud" || arg === "cloud") {
     isUsingOllama = false;
     modelExplicitlySet = true;
-  } else if (startArgs[i] === "--code" || startArgs[i] === "code") {
+  } else if (arg === "--code" || arg === "code") {
     isUsingOllama = true;
     modelExplicitlySet = true;
-  } else if (!startArgs[i].startsWith("-") && startArgs[i] !== "code" && startArgs[i] !== "cloud") {
-    ollamaModelName = startArgs[i];
+  } else if (arg === "--ask" && startArgs[i + 1]) {
+    askPrompt = startArgs[i + 1];
+    i++;
+  } else if (arg === "--exec" && startArgs[i + 1]) {
+    execPrompt = startArgs[i + 1];
+    i++;
+  } else if (arg === "--continue" || arg === "--session") {
+    if (startArgs[i + 1] && !startArgs[i + 1].startsWith("-")) {
+      resumeSessionId = startArgs[i + 1];
+      i++;
+    } else {
+      resumeSessionId = "latest";
+    }
+  } else if (arg === "--verbose" || arg === "--debug") {
+    verbose = true;
+  } else if (arg === "--tui") {
+    tuiMode = true;
+  } else if (arg === "--atomic-commits") {
+    atomicCommits = true;
+  } else if (!arg.startsWith("-") && arg !== "code" && arg !== "cloud") {
+    ollamaModelName = arg;
     isUsingOllama = true;
-    const isCloudModel = startArgs[i].startsWith("gemini-") || startArgs[i].startsWith("claude-");
+    const isCloudModel = arg.startsWith("gemini-") || arg.startsWith("claude-");
     if (isCloudModel) {
       isUsingOllama = false;
     }
     modelExplicitlySet = true;
-  } else if (startArgs[i] === "--atomic-commits") {
-    atomicCommits = true;
   }
+}
+
+// --verbose / --debug: surface ADK's internal logs (default is ERROR-only).
+if (verbose) {
+  setLogLevel(LogLevel.INFO);
+  process.env.OLLAMA_CODE_DEBUG = "1";
 }
 
 // If no explicit model was passed on the command line, restore the last model
@@ -366,6 +393,7 @@ const engineerAgent = new LlmAgent(agentConfig);
 // Keep the delegate_task sub-agent in sync with the live model so it follows
 // /model switches (engineerAgent.model is mutated in-place by the handler).
 setDelegateModel(engineerAgent.model);
+setSubAgentModel(engineerAgent.model);
 engineerAgent.afterToolCallback = () => {
   // Restart spinner after tool completes (will be cleared when text arrives)
   startSpinner("Thinking...");
@@ -577,6 +605,15 @@ async function main() {
   printWelcomeBanner({ displayModelName, isUsingOllama });
   await cacheLocalModels();
 
+  // Load MCP server tools (if any are configured) and merge them into the
+  // agent's toolset. Non-fatal: if none are configured or all fail, the agent
+  // just runs with the built-in tools.
+  const mcpTools = await loadMcpTools();
+  if (mcpTools.length > 0) {
+    engineerAgent.tools = [...allTools, ...mcpTools];
+    console.log(`  ${c.meta(`🔌 Loaded ${mcpTools.length} MCP tool(s) from ${listMcpServers().join(", ")}`)}`);
+  }
+
   // Resolve the real context window for the active Ollama model so the
   // context-% footer reflects what's actually loaded (not a hardcoded guess).
   if (isUsingOllama && model instanceof OllamaLlm) {
@@ -602,14 +639,34 @@ async function main() {
     sessionService,
   });
 
-  // Resume the most recent session for this user if one exists; else create new.
+  // Resume a session: --session <id> / --continue <id> for a specific one,
+  // --continue (no arg) for the most recent, else the most recent by default.
   let session;
   try {
     const listed = await sessionService.listSessions({ appName: runner.appName, userId: "local-user" });
-    const recent = listed.sessions?.[0];
-    session = recent
-      ? await sessionService.getSession({ appName: runner.appName, userId: "local-user", sessionId: recent.id })
-      : undefined;
+
+    // --tui: open the interactive session browser to pick a session.
+    if (tuiMode && !resumeSessionId) {
+      const sessions = (listed.sessions || []).map((s: any) => ({
+        id: s.id,
+        title: s.title || s.id,
+      }));
+      const picked = await sessionBrowser(sessions);
+      if (picked) {
+        session = await sessionService.getSession({ appName: runner.appName, userId: "local-user", sessionId: picked });
+      }
+    }
+
+    if (!session) {
+      if (resumeSessionId && resumeSessionId !== "latest") {
+        session = await sessionService.getSession({ appName: runner.appName, userId: "local-user", sessionId: resumeSessionId });
+      } else {
+        const recent = listed.sessions?.[0];
+        session = recent
+          ? await sessionService.getSession({ appName: runner.appName, userId: "local-user", sessionId: recent.id })
+          : undefined;
+      }
+    }
   } catch (e) {
     session = undefined;
   }
@@ -628,6 +685,73 @@ async function main() {
     }
     // Else: ignore. /exit is the way out.
   });
+
+  // ─── One-shot modes (--ask / --exec) ─────────────────────────────────────
+  // --ask: a single Q&A with no tools and no session persistence (like Copilot
+  // CLI's --ask). --exec: a single autonomous agent run (full toolset) that
+  // exits when done. Both print the result and return without entering the REPL.
+  if (askPrompt !== null || execPrompt !== null) {
+    const prompt = askPrompt ?? execPrompt!;
+    const isAsk = askPrompt !== null;
+    if (isAsk) {
+      const answer = await runUtilityAgent(engineerAgent.model, "You are a helpful assistant. Answer the user's question concisely and accurately.", prompt);
+      console.log();
+      console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+      process.stdout.write(renderMarkdown(answer));
+      console.log();
+      console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+      console.log();
+    } else {
+      const gitContext = await getGitContext();
+      const memoryContext = getMemoryContext();
+      const fullPrompt = `${gitContext}${memoryContext}\n\nUser request: ${prompt}`;
+      activeAbort = new AbortController();
+      isGenerating = true;
+      beginStream();
+      armGenerationInterrupt();
+      try {
+        for await (const event of runner.runAsync({
+          userId: session.userId,
+          sessionId: session.id,
+          newMessage: { role: "user", parts: [{ text: fullPrompt }] },
+          abortSignal: activeAbort.signal,
+          runConfig: { maxLlmCalls: 60 },
+        })) {
+          if (activeAbort.signal.aborted) break;
+          if (event.content && event.content.parts) {
+            const text = event.content.parts
+              .filter((part: any) => part.text)
+              .map((part: any) => part.text)
+              .join("");
+            if (text) {
+              if (stream.buffer && (text === stream.buffer || stream.buffer.endsWith(text) || text.endsWith(stream.buffer))) {
+                stream.buffer = "";
+              } else {
+                stopSpinner();
+                stream.buffer = "";
+                process.stdout.write(renderMarkdown(text));
+              }
+            }
+          }
+        }
+        stopSpinner();
+        if (stream.emittedNewline) process.stdout.write('\n');
+        console.log();
+      } catch (err: any) {
+        stopSpinner();
+        console.log(`\n  ${c.error(`Error: ${err.message}`)}\n`);
+      } finally {
+        disarmGenerationInterrupt();
+        isGenerating = false;
+        endStream();
+        activeAbort = null;
+      }
+    }
+    killAllBackgroundJobs();
+    closeMcpConnections().catch(() => {});
+    closeLspClients();
+    process.exit(0);
+  }
 
   let turnNumber = 0;
   while (true) {
@@ -710,7 +834,8 @@ async function main() {
             engineerAgent.model = modelArg; // ADK default connector for the bare string
             engineerAgent.instruction = cloudPrompts[modelArg] ?? cloudPrompts[cloudModelName]!;
             engineerAgent.generateContentConfig = cloudParams[modelArg] ?? cloudParams[cloudModelName];
-            setDelegateModel(engineerAgent.model);
+setDelegateModel(engineerAgent.model);
+setSubAgentModel(engineerAgent.model);
             ollamaModelName = modelArg;
             displayModelName = modelArg;
             // Flip to cloud mode at runtime: clear the mock key so ADK uses real
@@ -726,6 +851,7 @@ async function main() {
             const newModel = new OllamaLlm({ model: ollamaModelName, baseUrl: ollamaBaseUrl, onToken: streamToken });
             engineerAgent.model = newModel;
             setDelegateModel(newModel);
+            setSubAgentModel(newModel);
             // Resolve the new model's real context window for the footer.
             await newModel.refreshContextWindow();
             engineerAgent.instruction = systemPrompts[ollamaModelName] ?? systemPrompts["gemma4-coder-tuned:latest"]!;
@@ -762,10 +888,210 @@ async function main() {
       } else if (command === "/review" || command === "/code-review") {
         await handleAdversarialReview();
         continue;
+      } else if (command === "/review-diff") {
+        // Batch diff review gate: show the full uncommitted diff and let the
+        // user accept (keep) or reject (git restore) the changes.
+        try {
+          const isGit = await ensureGitRepository();
+          if (!isGit) {
+            console.log(`\n  ${c.error("Error: Not inside a Git repository.")}\n`);
+            continue;
+          }
+          let diff = execSync("git diff", { encoding: "utf-8" }).trim();
+          if (!diff) diff = execSync("git diff --staged", { encoding: "utf-8" }).trim();
+          if (!diff) {
+            console.log(`\n  ${c.white("No uncommitted changes to review.")}\n`);
+            continue;
+          }
+          console.log();
+          console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+          process.stdout.write(renderMarkdown("```diff\n" + diff + "\n```"));
+          console.log();
+          console.log(c.border('─'.repeat(process.stdout.columns || 80)));
+          console.log();
+          const keep = await confirmAction("Keep these changes? (No discards them via git restore)");
+          if (!keep) {
+            execSync("git restore .", { stdio: "ignore" });
+            console.log(`  ${c.success("✓ Discarded uncommitted changes.")}\n`);
+          } else {
+            console.log(`  ${c.success("✓ Changes kept.")}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n  ${c.error(`Error during diff review: ${err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/index") {
+        console.log(`\n  ${c.meta("⚡ Building semantic search index...")}`);
+        startSpinner("Indexing...");
+        const status = await buildIndex(ollamaBaseUrl);
+        stopSpinner();
+        console.log(`  ${c.success(`✓ ${status}`)}\n`);
+        continue;
+      } else if (command === "/mcp") {
+        const servers = listMcpServers();
+        if (servers.length === 0) {
+          console.log(`\n  ${c.dim("No MCP servers configured. Add an \"mcpServers\" block to .ollama-code.json.")}\n`);
+        } else {
+          console.log(`\n  ${c.bold("Configured MCP Servers:")}`);
+          for (const s of servers) console.log(`  - ${c.white(s)}`);
+          console.log();
+        }
+        continue;
+      } else if (command === "/agents") {
+        const custom = reloadSubAgents();
+        console.log(`\n  ${c.bold("Available Sub-Agents:")}`);
+        for (const a of listSubAgents()) {
+          console.log(`  - ${c.white(a.name)}${a.tools ? c.dim(` [tools: ${a.tools.join(", ")}]`) : ""}`);
+          console.log(`    ${c.dim(a.description)}`);
+        }
+        console.log(`\n  ${c.dim(`(${custom} custom agent(s) from config)`)}\n`);
+        continue;
+      } else if (command === "/permissions") {
+        const source = reloadPermissions();
+        console.log(`\n  ${c.meta("Permission rules reloaded.")}${source ? c.dim(` (from ${source})`) : c.dim(" (no config file found — all tools ask)")}`);
+        console.log(`  ${c.dim("Example: create .ollama-code.json with { \"permissions\": { \"allow\": [\"git_status\"], \"deny\": [\"execute_bash:rm -rf\"] } }")}\n`);
+        continue;
+      } else if (command === "/gh") {
+        // Pass through to the gh CLI: /gh pr list, /gh issue create --title ...
+        const ghArgs = parts.slice(1);
+        if (ghArgs.length === 0) {
+          console.log(`\n  ${c.dim("Usage: /gh <gh args>  e.g. /gh pr list, /gh issue list")}\n`);
+          continue;
+        }
+        try {
+          const { execFileSync } = await import("child_process");
+          const out = execFileSync("gh", ghArgs, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+          console.log();
+          process.stdout.write(out);
+          console.log();
+        } catch (err: any) {
+          console.log(`\n  ${c.error(`gh failed: ${err.stderr || err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/explain" || command === "/fix" || command === "/tests") {
+        // Intent commands: run a focused utility-agent pass over the target.
+        const target = parts.slice(1).join(" ") || ".";
+        const intent = command.slice(1); // explain | fix | tests
+        const systemPrompt = {
+          explain: `You are a code explainer. Given a file path or code section, explain what it does, its key functions, and how it fits together. Be concise and structured.`,
+          fix: `You are a debugging agent. Given a bug or error description, investigate the relevant code (use read_file/grep_search), identify the root cause, and apply a minimal fix with edit_file. Verify with execute_bash if possible. Report what you changed.`,
+          tests: `You are a test-writing agent. Given a target (file or feature), write appropriate tests for it following the project's existing test conventions. Use read_file to understand the code, then write the test file. Report what you created.`,
+        }[intent];
+        const gitContext = await getGitContext();
+        const memoryContext = getMemoryContext();
+        const userPrompt = `${gitContext}${memoryContext}\n\nTask: ${target}`;
+        console.log(`\n  ${c.meta(`⚡ Running /${intent} on: ${target}`)}`);
+        startSpinner("Thinking...");
+        try {
+          const result = await runUtilityAgent(engineerAgent.model, systemPrompt, userPrompt, {
+            tools: allTools,
+            onToken: (t) => process.stdout.write(t),
+          });
+          stopSpinner();
+          console.log();
+          if (!result.trim()) console.log(`  ${c.warn("(no output)")}`);
+        } catch (err: any) {
+          stopSpinner();
+          console.log(`\n  ${c.error(`Error during /${intent}: ${err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/share") {
+        // Export the current session to a local file or a GitHub gist.
+        try {
+          const history = await sessionService.getSession({ appName: "local-claude-ts", userId: "local-user", sessionId: session.id });
+          const events = history?.events || [];
+          if (events.length === 0) {
+            console.log(`\n  ${c.white("No conversation history to share.")}\n`);
+            continue;
+          }
+          const target = parts[1]?.toLowerCase();
+          if (target === "gist") {
+            console.log(`\n  ${c.meta("⚡ Posting session to GitHub gist...")}`);
+            startSpinner("Sharing...");
+            try {
+              const url = await exportToGist(events);
+              stopSpinner();
+              console.log(`  ${c.success(`✓ Shared: ${url}`)}\n`);
+            } catch (err: any) {
+              stopSpinner();
+              console.log(`  ${c.error(`Gist failed: ${err.message}`)}\n`);
+            }
+          } else {
+            const file = exportToFile(events);
+            console.log(`  ${c.success(`✓ Exported session to ${file}`)}\n`);
+          }
+        } catch (err: any) {
+          console.log(`\n  ${c.error(`Error sharing session: ${err.message}`)}\n`);
+        }
+        continue;
+      } else if (command === "/lsp") {
+        // Run LSP diagnostics on a file (or the current diff's files).
+        const target = parts[1];
+        if (!target) {
+          console.log(`\n  ${c.dim("Usage: /lsp <file>  (requires an LSP server configured in .ollama-code.json)")}\n`);
+          continue;
+        }
+        const fullPath = path.resolve(target);
+        if (!fs.existsSync(fullPath)) {
+          console.log(`\n  ${c.error(`File not found: ${target}`)}\n`);
+          continue;
+        }
+        console.log(`\n  ${c.meta(`⚡ Running LSP diagnostics on ${target}...`)}`);
+        startSpinner("Analyzing...");
+        const diags = await lspDiagnostics(fullPath);
+        stopSpinner();
+        if (diags.length === 0) {
+          console.log(`  ${c.success("✓ No diagnostics reported.")}\n`);
+        } else {
+          for (const d of diags) {
+            const sev = d.severity === "Error" ? c.error(d.severity) : c.warn(d.severity);
+            console.log(`  ${sev} ${d.file}:${d.line} — ${d.message}`);
+          }
+          console.log();
+        }
+        continue;
+      } else if (command === "/plugins") {
+        const n = reloadPlugins();
+        if (n === 0) {
+          console.log(`\n  ${c.dim("No plugins configured. Add a \"plugins\" block to .ollama-code.json.")}\n`);
+        } else {
+          console.log(`\n  ${c.bold("Loaded Plugins:")}`);
+          for (const p of listPlugins()) {
+            const hooksList = Object.keys(p.hooks).filter((h) => (p.hooks as any)[h]).join(", ");
+            console.log(`  - ${c.white(p.name)}${hooksList ? c.dim(` [hooks: ${hooksList}]`) : ""}`);
+          }
+          console.log();
+        }
+        continue;
       } else if (command === "/dream") {
         await handleAutoDream(sessionService, session.id, false);
         continue;
       } else {
+        // Custom commands from config: /<name> <args> runs the configured prompt
+        // template with {input} replaced by the args, via a utility agent.
+        const cc = customCommands.find((c) => c.name === command.slice(1));
+        if (cc) {
+          const input = parts.slice(1).join(" ");
+          const prompt = cc.prompt.replace(/\{input\}/g, input);
+          const gitContext = await getGitContext();
+          const memoryContext = getMemoryContext();
+          const userPrompt = `${gitContext}${memoryContext}\n\n${prompt}`;
+          console.log(`\n  ${c.meta(`⚡ Running custom command /${cc.name}...`)}`);
+          startSpinner("Thinking...");
+          try {
+            const result = await runUtilityAgent(engineerAgent.model, "You are a helpful coding assistant. Follow the user's instruction precisely.", userPrompt, {
+              tools: cc.tools ? allTools.filter((t) => cc.tools!.includes(t.name)) : allTools,
+              onToken: (t) => process.stdout.write(t),
+            });
+            stopSpinner();
+            console.log();
+            if (!result.trim()) console.log(`  ${c.warn("(no output)")}`);
+          } catch (err: any) {
+            stopSpinner();
+            console.log(`\n  ${c.error(`Error running /${cc.name}: ${err.message}`)}\n`);
+          }
+          continue;
+        }
         console.log(`\n  ${c.error(`Unknown command: ${command}. Type /help for options.`)}\n`);
         continue;
       }
@@ -825,6 +1151,7 @@ async function main() {
     beginStream();
     let interrupted = false;
     armGenerationInterrupt(); // capture Esc / Ctrl-C mid-generation
+    hooks.beforeTurn(fullPromptWithPlan, session.id, displayModelName);
 
     try {
       let hasOutput = false;
@@ -852,6 +1179,7 @@ async function main() {
           if (functionCalls.length > 0) {
             for (const fc of functionCalls) {
               stopSpinner();
+              hooks.beforeTool(fc.functionCall!.name || "unknown", fc.functionCall!.args || {});
               printToolCall(fc.functionCall!.name || "unknown", fc.functionCall!.args || {});
               startSpinner("Thinking...");
             }
@@ -945,6 +1273,7 @@ async function main() {
       }
 
       console.log(); // Breathing room before next prompt
+      hooks.afterTurn(session.id, displayModelName);
 
     } catch (err: any) {
       stopSpinner();
@@ -966,5 +1295,7 @@ async function main() {
 main().catch((err) => {
   console.error(c.error(`Fatal error: ${err.message}`));
   killAllBackgroundJobs();
+  closeMcpConnections().catch(() => {});
+  closeLspClients();
   process.exit(1);
 });

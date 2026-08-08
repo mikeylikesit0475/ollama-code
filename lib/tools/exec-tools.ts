@@ -10,6 +10,7 @@ import { c, confirmAction, printToolCall, printToolResult, stopSpinner } from ".
 import { isPathInWorkspace, commandReferencesOutsideWorkspace } from "../workspace.ts";
 import { loopGuard, MAX_TOOL_CALLS_PER_TURN, MAX_CONSECUTIVE_BASH, exceedsToolCallCap, isBashThrashing } from "../loop-guard.ts";
 import { isSandboxEnabled, wrapCommand } from "../sandbox.ts";
+import { confirmOrAllow } from "../permissions.ts";
 
 const COMMON_CS_NAMESPACES: Record<string, string> = {
   "List": "using System.Collections.Generic;",
@@ -286,11 +287,19 @@ export const executeBash = new FunctionTool({
       console.log(`  ${c.warn("⚠️  This command references paths OUTSIDE the workspace.")}`);
     }
 
-    const confirmed = await confirmAction(
-      escapesWorkspace ? "Allow execution of OUT-OF-WORKSPACE command?" : "Allow execution?"
+    const confirmed = await confirmOrAllow(
+      "execute_bash",
+      { command, cwd },
+      () => confirmAction(
+        escapesWorkspace ? "Allow execution of OUT-OF-WORKSPACE command?" : "Allow execution?"
+      )
     );
 
-    if (!confirmed) {
+    if (!confirmed.proceed) {
+      if (confirmed.reason === "deny") {
+        printToolResult(c.error("BLOCKED by permission rules."));
+        return { status: "denied", message: "User aborted command execution." };
+      }
       printToolResult("Denied by user.");
       return { status: "denied", message: "User aborted command execution." };
     }
